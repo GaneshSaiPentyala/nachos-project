@@ -336,7 +336,11 @@ void handle_SC_Exit() {
     kernel->machine->WriteRegister(2, SysExit(id));
     return move_program_counter();
 }
-
+void handleSleepSyscall() {
+    int ticks = kernel->machine->ReadRegister(4);
+    SysSleep(ticks);
+    move_program_counter();
+}
 void handle_SC_CreateSemaphore() {
     int virtAddr = kernel->machine->ReadRegister(4);
     int semval = kernel->machine->ReadRegister(5);
@@ -439,6 +443,8 @@ void ExceptionHandler(ExceptionType which) {
                     return handle_SC_RandomNum();
                 case SC_ReadString:
                     return handle_SC_ReadString();
+                case SC_Sleep:
+                    return handleSleepSyscall();
                 case SC_PrintString:
                     return handle_SC_PrintString();
                 case SC_CreateFile:

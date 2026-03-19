@@ -112,7 +112,7 @@ ifeq ($(hosttype),unknown)
 PROGRAMS = unknownhost
 else
 # change this if you create a new test program!
-PROGRAMS = child add abs halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
+PROGRAMS = child add abs halt shell matmult sort segments sleep_test test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
 endif
 
 all: $(PROGRAMS)
@@ -276,3 +276,9 @@ unknownhost:
 	@echo make is terminating.
 	@echo If you are on an MFCF machine, contact the instructor to report this problem
 	@echo Otherwise, edit Makefile.dep and try again.
+sleep_test.o: sleep_test.c
+	$(CC) $(CFLAGS) -c sleep_test.c
+
+sleep_test: sleep_test.o start.o
+	$(LD) $(LDFLAGS) start.o sleep_test.o -o sleep_test.coff
+	$(COFF2NOFF) sleep_test.coff sleep_test

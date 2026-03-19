@@ -16,7 +16,15 @@
 // The following class defines the scheduler/dispatcher abstraction --
 // the data structures and operations needed to keep track of which
 // thread is running, and which threads are ready but not running.
-
+class SleepEntry {
+  public:
+    SleepEntry(Thread* t, int wt) {
+        thread = t;
+        wakeTick = wt;
+    }
+    Thread* thread;
+    int wakeTick;
+};
 class Scheduler {
    public:
     Scheduler();   // Initialize list of ready threads
@@ -24,7 +32,9 @@ class Scheduler {
 
     void ReadyToRun(Thread* thread);
     // Thread can be dispatched.
-    Thread* FindNextToRun();  // Dequeue first thread on the ready
+    Thread* FindNextToRun();
+    void addToSleep(Thread* t, int wakeTick);
+    bool processSleepList();  // Dequeue first thread on the ready
                               // list, if any, and return thread.
     void Run(Thread* nextThread, bool finishing);
     // Cause nextThread to start running
@@ -35,7 +45,8 @@ class Scheduler {
     // SelfTest for scheduler is implemented in class Thread
 
    private:
-    SortedList<Thread*>* readyList;  // queue of threads that are ready to run,
+    SortedList<Thread*>* readyList; 
+    List<SleepEntry*>* sleepList; // queue of threads that are ready to run,
                                // but not running
     Thread* toBeDestroyed;     // finishing thread to be destroyed
                                // by the next thread that runs

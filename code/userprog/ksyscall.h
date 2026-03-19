@@ -115,6 +115,12 @@ char SysReadChar() { return kernel->synchConsoleIn->GetChar(); }
 void SysPrintChar(char character) {
     kernel->synchConsoleOut->PutChar(character);
 }
+void SysSleep(int duration) {
+    if (duration <= 0) return;
+
+    int wakeTick = kernel->stats->totalTicks + duration;
+    kernel->scheduler->addToSleep(kernel->currentThread, wakeTick);
+}
 
 int SysRandomNum() { return random(); }
 
