@@ -12,6 +12,7 @@
 
 #ifndef SYSCALLS_H
 #define SYSCALLS_H
+#define SC_Sleep 60
 
 #include "copyright.h"
 #include "errno.h"
