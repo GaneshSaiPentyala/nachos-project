@@ -157,7 +157,12 @@ void Interrupt::OneTick() {
     ChangeLevel(IntOn, IntOff);  // first, turn off interrupts
                                  // (interrupt handlers run with
                                  // interrupts disabled)
-    CheckIfDue(FALSE);           // check for pending interrupts
+    CheckIfDue(FALSE);   
+    bool woke = kernel->scheduler->processSleepList();
+    if (woke) {
+        yieldOnReturn = TRUE;
+        DEBUG(dbgInt, "Sleep threads moved to ready queue");
+    }        // check for pending interrupts
     ChangeLevel(IntOff, IntOn);  // re-enable interrupts
     if (yieldOnReturn) {         // if the timer device handler asked
                                  // for a context switch, ok to do it now

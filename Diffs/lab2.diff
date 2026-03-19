@@ -1,0 +1,187 @@
+diff --git a/code/lib/list.h b/code/lib/list.h
+index 3ce9553..9ad2b74 100644
+--- a/code/lib/list.h
++++ b/code/lib/list.h
+@@ -108,7 +108,9 @@ class SortedList : public List<T> {
+         Insert(item);
+     }                                      // *pre*pending has no meaning
+                                            //	in a sorted list
+-    void Append(T item) { Insert(item); }  // neither does *ap*pend
++    void Append(T item) { Insert(item); }
++    private:
++        int (*comapre)(T x, T y);  // neither does *ap*pend
+ };
+ 
+ // The following class can be used to step through a list.
+diff --git a/code/test/Makefile b/code/test/Makefile
+index 3e2b313..7c1d3f1 100644
+--- a/code/test/Makefile
++++ b/code/test/Makefile
+@@ -112,7 +112,7 @@ ifeq ($(hosttype),unknown)
+ PROGRAMS = unknownhost
+ else
+ # change this if you create a new test program!
+-PROGRAMS = add abs halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
++PROGRAMS = child add abs halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
+ endif
+ 
+ all: $(PROGRAMS)
+@@ -132,6 +132,12 @@ add.o: add.c
+ add: add.o start.o
+ 	$(LD) $(LDFLAGS) start.o add.o -o add.coff
+ 	$(COFF2NOFF) add.coff add
++child.o: child.c
++	$(CC) $(CFLAGS) -c child.c
++
++child: child.o start.o
++	$(LD) $(LDFLAGS) start.o child.o -o child.coff
++	$(COFF2NOFF) child.coff child
+ abs.o: abs.c
+ 	$(CC) $(CFLAGS) -c abs.c
+ abs: abs.o start.o
+diff --git a/code/test/add.c b/code/test/add.c
+index 2ce8f21..9c91be9 100644
+--- a/code/test/add.c
++++ b/code/test/add.c
+@@ -12,7 +12,5 @@ int main() {
+ 
+     result = Add(42, 23);
+     PrintNum(result);
+-
+-    Halt();
+-    /* not reached */
++    return 0;
+ }
+diff --git a/code/threads/scheduler.cc b/code/threads/scheduler.cc
+index 1d52916..0b3fa83 100644
+--- a/code/threads/scheduler.cc
++++ b/code/threads/scheduler.cc
+@@ -30,8 +30,14 @@
+ //----------------------------------------------------------------------
+ 
+ Scheduler::Scheduler() {
+-    readyList = new List<Thread *>;
++    
+     toBeDestroyed = NULL;
++    readyList = new SortedList<Thread *>(ThreadCompare);
++}
++static int ThreadCompare(Thread *a, Thread *b) {
++    if (a->priority > b->priority) return -1;
++    else if (a->priority < b->priority) return 1;
++    else return 0;
+ }
+ 
+ //----------------------------------------------------------------------
+diff --git a/code/threads/scheduler.h b/code/threads/scheduler.h
+index a96f228..911f0db 100644
+--- a/code/threads/scheduler.h
++++ b/code/threads/scheduler.h
+@@ -35,7 +35,7 @@ class Scheduler {
+     // SelfTest for scheduler is implemented in class Thread
+ 
+    private:
+-    List<Thread*>* readyList;  // queue of threads that are ready to run,
++    SortedList<Thread*>* readyList;  // queue of threads that are ready to run,
+                                // but not running
+     Thread* toBeDestroyed;     // finishing thread to be destroyed
+                                // by the next thread that runs
+diff --git a/code/threads/thread.cc b/code/threads/thread.cc
+index be9f7d6..e72e06f 100644
+--- a/code/threads/thread.cc
++++ b/code/threads/thread.cc
+@@ -39,6 +39,7 @@ Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
+     stackTop = NULL;
+     stack = NULL;
+     status = JUST_CREATED;
++    priority = random() % 10000;
+     for (int i = 0; i < MachineStateSize; i++) {
+         machineState[i] = NULL;  // not strictly necessary, since
+                                  // new thread ignores contents
+@@ -200,9 +201,9 @@ void Thread::Yield() {
+ 
+     DEBUG(dbgThread, "Yielding thread: " << name);
+ 
++    kernel->scheduler->ReadyToRun(this);
+     nextThread = kernel->scheduler->FindNextToRun();
+     if (nextThread != NULL) {
+-        kernel->scheduler->ReadyToRun(this);
+         kernel->scheduler->Run(nextThread, FALSE);
+     }
+     (void)kernel->interrupt->SetLevel(oldLevel);
+@@ -362,6 +363,7 @@ void Thread::SaveUserState() {
+         userRegisters[i] = kernel->machine->ReadRegister(i);
+ }
+ 
++
+ //----------------------------------------------------------------------
+ // Thread::RestoreUserState
+ //	Restore the CPU state of a user program on a context switch.
+@@ -389,7 +391,10 @@ static void SimpleThread(int which) {
+     int num;
+ 
+     for (num = 0; num < 5; num++) {
+-        cout << "*** thread " << which << " looped " << num << " times\n";
++        cout << "*** thread " << which
++             << " (Priority: " << kernel->currentThread->priority << ")"
++             << " looped " << num << " times\n";
++        
+         kernel->currentThread->Yield();
+     }
+ }
+@@ -402,10 +407,24 @@ static void SimpleThread(int which) {
+ 
+ void Thread::SelfTest() {
+     DEBUG(dbgThread, "Entering Thread::SelfTest");
++    cout << "--- Starting Priority Scheduler Test ---\n";
++
++    Thread *t1 = new Thread("Thread 1");
++    t1->priority = 10;
++
++    Thread *t2 = new Thread("Thread 2");
++    t2->priority = 50;
+ 
+-    Thread *t = new Thread("forked thread");
++    Thread *t3 = new Thread("Thread 3");
++    t3->priority = 30;
+ 
+-    t->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
++    t1->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
++    t2->Fork((VoidFunctionPtr)SimpleThread, (void *)2);
++    t3->Fork((VoidFunctionPtr)SimpleThread, (void *)3);
++
++    cout << "Main thread yielding...\n";
+     kernel->currentThread->Yield();
+-    SimpleThread(0);
++
++    cout << "--- Priority Scheduler Test Complete ---\n";
++    
+ }
+diff --git a/code/threads/thread.h b/code/threads/thread.h
+index 3fbf156..1162445 100644
+--- a/code/threads/thread.h
++++ b/code/threads/thread.h
+@@ -44,6 +44,8 @@
+ #include "machine.h"
+ #include "addrspace.h"
+ 
++
++
+ // CPU register state to be saved on context switch.
+ // The x86 needs to save only a few registers,
+ // SPARC and MIPS needs to save 10 registers,
+@@ -90,6 +92,7 @@ class Thread {
+     int processID;
+     int parrentID;
+     int exitStatus;
++    int priority;
+     void FreeSpace() {
+         if (space != 0) delete space;
+     }
+@@ -107,6 +110,7 @@ class Thread {
+ 
+     void CheckOverflow();  // Check if thread stack has overflowed
+     void setStatus(ThreadStatus st) { status = st; }
++    void setPriority(int p) { priority = p; }
+     char *getName() { return (name); }
+     void Print() { cout << name; }
+     void SelfTest();  // test whether thread impl is working
