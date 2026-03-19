@@ -1,0 +1,106 @@
+diff --git a/code/test/Makefile b/code/test/Makefile
+index 2d0e84c..fcef542 100644
+--- a/code/test/Makefile
++++ b/code/test/Makefile
+@@ -112,7 +112,7 @@ ifeq ($(hosttype),unknown)
+ PROGRAMS = unknownhost
+ else
+ # change this if you create a new test program!
+-PROGRAMS = add halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
++PROGRAMS = add abs halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
+ endif
+ 
+ all: $(PROGRAMS)
+@@ -133,6 +133,13 @@ add: add.o start.o
+ 	$(LD) $(LDFLAGS) start.o add.o -o add.coff
+ 	$(COFF2NOFF) add.coff add
+ 
++abs.o: abs.c
++	$(CC) $(CFLAGS) -c abs.c
++
++abs: abs.o start.o
++	$(LD) $(LDFLAGS) start.o abs.o -o abs.coff
++	$(COFF2NOFF) abs.coff abs
++
+ shell.o: shell.c
+ 	$(CC) $(CFLAGS) -c shell.c
+ shell: shell.o start.o
+diff --git a/code/test/add.c b/code/test/add.c
+index 70b6925..cb41d92 100644
+--- a/code/test/add.c
++++ b/code/test/add.c
+@@ -11,7 +11,7 @@ int main() {
+     int result;
+ 
+     result = Add(42, 23);
+-
++    PrintNum(result);
+     Halt();
+     /* not reached */
+ }
+diff --git a/code/userprog/exception.cc b/code/userprog/exception.cc
+index a5d02c7..18efa72 100644
+--- a/code/userprog/exception.cc
++++ b/code/userprog/exception.cc
+@@ -154,6 +154,16 @@ void handle_SC_Add() {
+     return move_program_counter();
+ }
+ 
++void handle_SC_Abs() {
++    /* Process SysAbs Systemcall*/
++    int result;
++    result = SysAbs(
++        /* int op */ (int)kernel->machine->ReadRegister(4));
++    /* Prepare Result */
++    kernel->machine->WriteRegister(2, (int)result);
++    return move_program_counter();
++}
++
+ void handle_SC_ReadNum() {
+     int result = SysReadNum();
+     kernel->machine->WriteRegister(2, result);
+@@ -421,7 +431,9 @@ void ExceptionHandler(ExceptionType which) {
+                     return handle_SC_Halt();
+                 case SC_Add:
+                     return handle_SC_Add();
+-                case SC_ReadNum:
++                case SC_Abs:
++                    return handle_SC_Abs();
++		case SC_ReadNum:
+                     return handle_SC_ReadNum();
+                 case SC_PrintNum:
+                     return handle_SC_PrintNum();
+diff --git a/code/userprog/ksyscall.h b/code/userprog/ksyscall.h
+index 92bbe99..9d28d02 100644
+--- a/code/userprog/ksyscall.h
++++ b/code/userprog/ksyscall.h
+@@ -21,6 +21,8 @@ void SysHalt() { kernel->interrupt->Halt(); }
+ 
+ int SysAdd(int op1, int op2) { return op1 + op2; }
+ 
++int SysAbs(int op) {return (op>0) ? op : -op; }
++
+ int SysReadNum() {
+     readUntilBlank();
+ 
+diff --git a/code/userprog/syscall.h b/code/userprog/syscall.h
+index 0865b05..1037976 100644
+--- a/code/userprog/syscall.h
++++ b/code/userprog/syscall.h
+@@ -48,6 +48,7 @@
+ #define SC_Wait 52
+ #define SC_Signal 53
+ #define SC_GetPid 54
++#define SC_Abs 55
+ 
+ #ifndef IN_ASM
+ 
+@@ -70,6 +71,8 @@ void Halt();
+ 
+ int Add(int op1, int op2);
+ 
++int Abs(int op);
++
+ int ReadNum();
+ 
+ void PrintNum(int num);
