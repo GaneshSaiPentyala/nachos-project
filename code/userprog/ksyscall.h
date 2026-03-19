@@ -7,7 +7,7 @@
  * by Marcus Voelp  (c) Universitaet Karlsruhe
  *
  **************************************************************/
-
+#define SC_Abs 55
 #ifndef __USERPROG_KSYSCALL_H__
 #define __USERPROG_KSYSCALL_H__
 
@@ -15,6 +15,7 @@
 #include "synchconsole.h"
 #include "ksyscallhelper.h"
 #include <stdlib.h>
+int Abs(int op);
 
 void SysHalt() { kernel->interrupt->Halt(); }
 
