@@ -393,6 +393,12 @@ void handle_SC_GetPid() {
     kernel->machine->WriteRegister(2, SysGetPid());
     return move_program_counter();
 }
+void handle_SC_Abs() {
+int result;
+result = SysAbs((int)kernel->machine->ReadRegister(4));
+kernel->machine->WriteRegister(2, result);
+move_program_counter();
+}
 
 void ExceptionHandler(ExceptionType which) {
     int type = kernel->machine->ReadRegister(2);
@@ -437,6 +443,8 @@ void ExceptionHandler(ExceptionType which) {
                     return handle_SC_PrintString();
                 case SC_CreateFile:
                     return handle_SC_CreateFile();
+                case SC_Abs:
+                    return handle_SC_Abs();
                 case SC_Open:
                     return handle_SC_Open();
                 case SC_Close:
