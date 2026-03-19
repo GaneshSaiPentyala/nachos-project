@@ -39,6 +39,7 @@ Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
     stackTop = NULL;
     stack = NULL;
     status = JUST_CREATED;
+    priority = random() % 10000;
     for (int i = 0; i < MachineStateSize; i++) {
         machineState[i] = NULL;  // not strictly necessary, since
                                  // new thread ignores contents
@@ -200,9 +201,9 @@ void Thread::Yield() {
 
     DEBUG(dbgThread, "Yielding thread: " << name);
 
+    kernel->scheduler->ReadyToRun(this);
     nextThread = kernel->scheduler->FindNextToRun();
     if (nextThread != NULL) {
-        kernel->scheduler->ReadyToRun(this);
         kernel->scheduler->Run(nextThread, FALSE);
     }
     (void)kernel->interrupt->SetLevel(oldLevel);
@@ -362,6 +363,7 @@ void Thread::SaveUserState() {
         userRegisters[i] = kernel->machine->ReadRegister(i);
 }
 
+
 //----------------------------------------------------------------------
 // Thread::RestoreUserState
 //	Restore the CPU state of a user program on a context switch.
@@ -389,7 +391,10 @@ static void SimpleThread(int which) {
     int num;
 
     for (num = 0; num < 5; num++) {
-        cout << "*** thread " << which << " looped " << num << " times\n";
+        cout << "*** thread " << which
+             << " (Priority: " << kernel->currentThread->priority << ")"
+             << " looped " << num << " times\n";
+        
         kernel->currentThread->Yield();
     }
 }
@@ -402,10 +407,24 @@ static void SimpleThread(int which) {
 
 void Thread::SelfTest() {
     DEBUG(dbgThread, "Entering Thread::SelfTest");
+    cout << "--- Starting Priority Scheduler Test ---\n";
 
-    Thread *t = new Thread("forked thread");
+    Thread *t1 = new Thread("Thread 1");
+    t1->priority = 10;
 
-    t->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
+    Thread *t2 = new Thread("Thread 2");
+    t2->priority = 50;
+
+    Thread *t3 = new Thread("Thread 3");
+    t3->priority = 30;
+
+    t1->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
+    t2->Fork((VoidFunctionPtr)SimpleThread, (void *)2);
+    t3->Fork((VoidFunctionPtr)SimpleThread, (void *)3);
+
+    cout << "Main thread yielding...\n";
     kernel->currentThread->Yield();
-    SimpleThread(0);
+
+    cout << "--- Priority Scheduler Test Complete ---\n";
+    
 }
