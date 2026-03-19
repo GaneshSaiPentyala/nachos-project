@@ -30,8 +30,14 @@
 //----------------------------------------------------------------------
 
 Scheduler::Scheduler() {
-    readyList = new List<Thread *>;
+    
     toBeDestroyed = NULL;
+    readyList = new SortedList<Thread *>(ThreadCompare);
+}
+static int ThreadCompare(Thread *a, Thread *b) {
+    if (a->priority > b->priority) return -1;
+    else if (a->priority < b->priority) return 1;
+    else return 0;
 }
 
 //----------------------------------------------------------------------
