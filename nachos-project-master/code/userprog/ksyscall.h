@@ -166,7 +166,14 @@ int SysOpen(char* fileName, int type) {
     return id;
 }
 
-int SysClose(int id) { return kernel->fileSystem->Close(id); }
+int SysClose(int id) {
+    if (kernel->pipeDes->IsPipeDescriptor(id)) {
+        int result = kernel->pipeDes->closeDes(id);
+        if (result == 0) kernel->currentThread->RemovePipeDescriptor(id);
+        return result;
+    }
+    return kernel->fileSystem->Close(id);
+}
 
 int SysRead(char* buffer, int charCount, int fileId) {
     if (fileId == 0) {
@@ -204,9 +211,35 @@ int SysExec(char* name) {
     return kernel->pTab->ExecUpdate(name);
 }
 
+int SysExecP(char *name, int pDes) {
+    OpenFile *oFile = kernel->fileSystem->Open(name);
+    if (oFile == NULL) {
+        DEBUG(dbgSys, "\nExec:: Can't open this file.");
+        return -1;
+    }
+
+    delete oFile;
+    return kernel->pTab->ExecUpdate(name, pDes);
+}
+
+int SysExecPV(char *name, int *pDes, int pDesCount) {
+    OpenFile *oFile = kernel->fileSystem->Open(name);
+    if (oFile == NULL) {
+        DEBUG(dbgSys, "\nExec:: Can't open this file.");
+        return -1;
+    }
+
+    delete oFile;
+    return kernel->pTab->ExecUpdate(name, pDes, pDesCount);
+}
+
 int SysJoin(int id) { return kernel->pTab->JoinUpdate(id); }
 
-int SysExit(int id) { return kernel->pTab->ExitUpdate(id); }
+int SysExit(int id) {
+    kernel->pipeDes->CloseAllForProcess(kernel->currentThread->processID);
+    kernel->currentThread->ClearPipeDescriptors();
+    return kernel->pTab->ExitUpdate(id);
+}
 
 int SysCreateSemaphore(char* name, int initialValue) {
     int res = kernel->semTab->Create(name, initialValue);
@@ -245,5 +278,28 @@ int SysSignal(char* name) {
 }
 
 int SysGetPid() { return kernel->currentThread->processID; }
+
+int SysPipe(int *readFd, int *writeFd) {
+    int result = kernel->pipeDes->createDes(readFd, writeFd, "pipe");
+    if (result == 0) {
+        kernel->currentThread->AddPipeDescriptor(*readFd);
+        kernel->currentThread->AddPipeDescriptor(*writeFd);
+    }
+    return result;
+}
+
+int SysPipe(int fds[2]) { return SysPipe(&fds[0], &fds[1]); }
+
+int SysPipeRead(int desNum, char *buffer, int charCount) {
+    return kernel->pipeDes->readDes(desNum, buffer, charCount);
+}
+
+int SysPipeWrite(int desNum, char *buffer, int charCount) {
+    return kernel->pipeDes->writeDes(desNum, buffer, charCount);
+}
+
+int SysGetPD(int index) { return kernel->currentThread->GetPipeDescriptor(index); }
+
+int SysGetPDCount() { return kernel->currentThread->GetPipeDescriptorCount(); }
 
 #endif /* ! __USERPROG_KSYSCALL_H__ */

@@ -1,0 +1,400 @@
+diff --git a/code/userprog/addrspace.cc b/code/userprog/addrspace.cc
+index aae4cc0..552dcf0 100644
+--- a/code/userprog/addrspace.cc
++++ b/code/userprog/addrspace.cc
+@@ -21,6 +21,19 @@
+ #include "machine.h"
+ #include "synch.h"
+ 
++struct FrameRecord {
++    AddrSpace *owner;
++    unsigned int vpn;
++    bool occupied;
++};
++
++static FrameRecord gFrameTable[NumPhysPages];
++static unsigned int gClockHand = 0;
++static unsigned int gTlbHand = 0;
++
++int AllocateFrame(AddrSpace *space, unsigned int vpn);
++int SelectVictimFrame();
++
+ //----------------------------------------------------------------------
+ // SwapHeader
+ // 	Do little endian to big endian conversion on the bytes in the
+@@ -66,6 +79,9 @@ AddrSpace::AddrSpace() {
+     pageTable = NULL;
+     numPages = 0;
+     executable = NULL;
++    swapFile = NULL;
++    swapFileName = NULL;
++    pageInfo = NULL;
+     bzero(&noffHeader, sizeof(noffHeader));
+ }
+ 
+@@ -77,11 +93,21 @@ AddrSpace::AddrSpace() {
+ AddrSpace::~AddrSpace() {
+     int i;
+     for (i = 0; i < numPages; i++) {
+-        if (pageTable[i].valid && pageTable[i].physicalPage >= 0)
++        if (pageTable[i].valid && pageTable[i].physicalPage >= 0) {
++            InvalidateTlbForPhysicalPage(pageTable[i].physicalPage);
+             kernel->gPhysPageBitMap->Clear(pageTable[i].physicalPage);
++            gFrameTable[pageTable[i].physicalPage].occupied = false;
++            gFrameTable[pageTable[i].physicalPage].owner = NULL;
++        }
+     }
+     delete[] pageTable;
++    delete[] pageInfo;
+     delete executable;
++    delete swapFile;
++    if (swapFileName != NULL) {
++        kernel->fileSystem->Remove(swapFileName);
++        delete[] swapFileName;
++    }
+ }
+ 
+ //----------------------------------------------------------------------
+@@ -98,6 +124,9 @@ AddrSpace::AddrSpace(char *fileName) {
+     pageTable = NULL;
+     numPages = 0;
+     executable = kernel->fileSystem->Open(fileName);
++    swapFile = NULL;
++    swapFileName = NULL;
++    pageInfo = NULL;
+ 
+     unsigned int i, size;
+ 
+@@ -122,6 +151,7 @@ AddrSpace::AddrSpace(char *fileName) {
+     DEBUG(dbgAddr, "Initializing address space: " << numPages << ", " << size);
+ 
+     pageTable = new TranslationEntry[numPages];
++    pageInfo = new PageInfo[numPages];
+     for (i = 0; i < numPages; i++) {
+         pageTable[i].virtualPage = i;
+         pageTable[i].physicalPage = -1;
+@@ -129,7 +159,16 @@ AddrSpace::AddrSpace(char *fileName) {
+         pageTable[i].use = FALSE;
+         pageTable[i].dirty = FALSE;
+         pageTable[i].readOnly = FALSE;
++        pageInfo[i].hasSwapCopy = false;
++        pageInfo[i].isReadOnly = IsPageReadOnly(i);
+     }
++
++    char buffer[64];
++    sprintf(buffer, "nachos.swap.%d.%p", kernel->currentThread->processID, this);
++    swapFileName = new char[strlen(buffer) + 1];
++    strcpy(swapFileName, buffer);
++    kernel->fileSystem->Create(swapFileName);
++    swapFile = kernel->fileSystem->Open(swapFileName);
+     return;
+ }
+ 
+@@ -207,8 +246,14 @@ void AddrSpace::SaveState() {}
+ //----------------------------------------------------------------------
+ 
+ void AddrSpace::RestoreState() {
+-    kernel->machine->pageTable = pageTable;
+-    kernel->machine->pageTableSize = numPages;
++    if (kernel->machine->tlb != NULL) {
++        FlushTlb();
++        kernel->machine->pageTable = NULL;
++        kernel->machine->pageTableSize = 0;
++    } else {
++        kernel->machine->pageTable = pageTable;
++        kernel->machine->pageTableSize = numPages;
++    }
+ }
+ 
+ //----------------------------------------------------------------------
+@@ -268,6 +313,10 @@ bool AddrSpace::HandlePageFault(int badVAddr) {
+     unsigned int vpn = ((unsigned int)badVAddr) / PageSize;
+ 
+     if (vpn >= numPages) return false;
++    if (pageTable[vpn].valid) {
++        InstallTlbEntry(vpn);
++        return true;
++    }
+     return LoadPage(vpn);
+ }
+ 
+@@ -279,22 +328,33 @@ bool AddrSpace::LoadPage(unsigned int vpn) {
+         return true;
+     }
+ 
+-    int physicalPage = kernel->gPhysPageBitMap->FindAndSet();
+-    if (physicalPage == -1) {
+-        kernel->addrLock->V();
+-        return false;
+-    }
++    int physicalPage = AllocateFrame(this, vpn);
++    ASSERT(physicalPage >= 0);
+ 
+     bzero(&(kernel->machine->mainMemory[physicalPage * PageSize]), PageSize);
+ 
+-    LoadSegmentPage(noffHeader.code, vpn, physicalPage);
+-    LoadSegmentPage(noffHeader.initData, vpn, physicalPage);
++    if (pageInfo[vpn].hasSwapCopy) {
++        LoadFromSwap(vpn, physicalPage);
++    } else {
++        LoadSegmentPage(noffHeader.code, vpn, physicalPage);
++#ifdef RDATA
++        LoadSegmentPage(noffHeader.readonlyData, vpn, physicalPage);
++#endif
++        LoadSegmentPage(noffHeader.initData, vpn, physicalPage);
++    }
+ 
+     pageTable[vpn].physicalPage = physicalPage;
+     pageTable[vpn].valid = TRUE;
+     pageTable[vpn].use = FALSE;
+     pageTable[vpn].dirty = FALSE;
+-    pageTable[vpn].readOnly = FALSE;
++    pageTable[vpn].readOnly = pageInfo[vpn].isReadOnly &&
++                              !pageInfo[vpn].hasSwapCopy;
++
++    gFrameTable[physicalPage].occupied = true;
++    gFrameTable[physicalPage].owner = this;
++    gFrameTable[physicalPage].vpn = vpn;
++
++    InstallTlbEntry(vpn);
+ 
+     kernel->addrLock->V();
+     return true;
+@@ -321,3 +381,162 @@ void AddrSpace::LoadSegmentPage(const Segment &segment, unsigned int vpn,
+ 
+     executable->ReadAt(destination, copySize, inFileOffset);
+ }
++
++void AddrSpace::LoadFromSwap(unsigned int vpn, int physicalPage) {
++    ASSERT(swapFile != NULL);
++    swapFile->ReadAt(&kernel->machine->mainMemory[physicalPage * PageSize],
++                     PageSize, SwapOffset(vpn));
++}
++
++void AddrSpace::EvictPage(unsigned int vpn) {
++    SyncTlbForVpn(vpn);
++
++    TranslationEntry *pte = &pageTable[vpn];
++    int physicalPage = pte->physicalPage;
++    if (physicalPage < 0) return;
++
++    if (pte->dirty) {
++        ASSERT(swapFile != NULL);
++        swapFile->WriteAt(&kernel->machine->mainMemory[physicalPage * PageSize],
++                          PageSize, SwapOffset(vpn));
++        pageInfo[vpn].hasSwapCopy = true;
++    }
++
++    InvalidateTlbForPhysicalPage(physicalPage);
++    pte->valid = FALSE;
++    pte->physicalPage = -1;
++    pte->use = FALSE;
++    pte->dirty = FALSE;
++    pte->readOnly = pageInfo[vpn].isReadOnly && !pageInfo[vpn].hasSwapCopy;
++}
++
++bool AddrSpace::IsPageReadOnly(unsigned int vpn) {
++    bool overlapsWritable =
++        PageOverlapsSegment(noffHeader.initData, vpn) ||
++        PageOverlapsSegment(noffHeader.uninitData, vpn);
++    if (overlapsWritable) return false;
++
++    if (PageOverlapsSegment(noffHeader.code, vpn)) return true;
++#ifdef RDATA
++    if (PageOverlapsSegment(noffHeader.readonlyData, vpn)) return true;
++#endif
++    return false;
++}
++
++bool AddrSpace::PageOverlapsSegment(const Segment &segment, unsigned int vpn) {
++    if (segment.size <= 0) return false;
++
++    unsigned int pageStart = vpn * PageSize;
++    unsigned int pageEnd = pageStart + PageSize;
++    unsigned int segmentStart = segment.virtualAddr;
++    unsigned int segmentEnd = segment.virtualAddr + segment.size;
++
++    return !(pageEnd <= segmentStart || pageStart >= segmentEnd);
++}
++
++int AddrSpace::SwapOffset(unsigned int vpn) { return vpn * PageSize; }
++
++void AddrSpace::FlushTlb() {
++    if (kernel->machine->tlb == NULL) return;
++
++    for (int i = 0; i < TLBSize; i++) {
++        if (kernel->machine->tlb[i].valid) {
++            unsigned int vpn = kernel->machine->tlb[i].virtualPage;
++            if (vpn < numPages) {
++                pageTable[vpn].use =
++                    pageTable[vpn].use || kernel->machine->tlb[i].use;
++                pageTable[vpn].dirty =
++                    pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
++            }
++            kernel->machine->tlb[i].valid = FALSE;
++        }
++    }
++}
++
++void AddrSpace::SyncTlbForVpn(unsigned int vpn) {
++    if (kernel->machine->tlb == NULL) return;
++
++    for (int i = 0; i < TLBSize; i++) {
++        if (kernel->machine->tlb[i].valid &&
++            kernel->machine->tlb[i].virtualPage == (int)vpn) {
++            pageTable[vpn].use = pageTable[vpn].use || kernel->machine->tlb[i].use;
++            pageTable[vpn].dirty =
++                pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
++            kernel->machine->tlb[i].valid = FALSE;
++        }
++    }
++}
++
++void AddrSpace::InvalidateTlbForPhysicalPage(int physicalPage) {
++    if (kernel->machine->tlb == NULL) return;
++
++    for (int i = 0; i < TLBSize; i++) {
++        if (kernel->machine->tlb[i].valid &&
++            kernel->machine->tlb[i].physicalPage == physicalPage) {
++            unsigned int vpn = kernel->machine->tlb[i].virtualPage;
++            if (vpn < numPages) {
++                pageTable[vpn].use = pageTable[vpn].use || kernel->machine->tlb[i].use;
++                pageTable[vpn].dirty =
++                    pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
++            }
++            kernel->machine->tlb[i].valid = FALSE;
++        }
++    }
++}
++
++void AddrSpace::InstallTlbEntry(unsigned int vpn) {
++    if (kernel->machine->tlb == NULL) return;
++
++    int slot = gTlbHand % TLBSize;
++    gTlbHand = (gTlbHand + 1) % TLBSize;
++
++    if (kernel->machine->tlb[slot].valid) {
++        unsigned int oldVpn = kernel->machine->tlb[slot].virtualPage;
++        if (oldVpn < numPages) {
++            pageTable[oldVpn].use = pageTable[oldVpn].use || kernel->machine->tlb[slot].use;
++            pageTable[oldVpn].dirty =
++                pageTable[oldVpn].dirty || kernel->machine->tlb[slot].dirty;
++        }
++    }
++
++    kernel->machine->tlb[slot] = pageTable[vpn];
++    kernel->machine->tlb[slot].valid = TRUE;
++}
++
++int AllocateFrame(AddrSpace *space, unsigned int vpn) {
++    int physicalPage = kernel->gPhysPageBitMap->FindAndSet();
++    if (physicalPage != -1) return physicalPage;
++
++    physicalPage = SelectVictimFrame();
++    ASSERT(physicalPage >= 0);
++    ASSERT(gFrameTable[physicalPage].occupied);
++    ASSERT(gFrameTable[physicalPage].owner != NULL);
++
++    gFrameTable[physicalPage].owner->EvictPage(gFrameTable[physicalPage].vpn);
++    return physicalPage;
++}
++
++int SelectVictimFrame() {
++    for (;;) {
++        FrameRecord *record = &gFrameTable[gClockHand];
++
++        if (!record->occupied) {
++            int frame = gClockHand;
++            gClockHand = (gClockHand + 1) % NumPhysPages;
++            return frame;
++        }
++
++        TranslationEntry *pte =
++            &record->owner->pageTable[record->vpn];
++        record->owner->SyncTlbForVpn(record->vpn);
++
++        if (!pte->use) {
++            int victim = gClockHand;
++            gClockHand = (gClockHand + 1) % NumPhysPages;
++            return victim;
++        }
++
++        pte->use = FALSE;
++        gClockHand = (gClockHand + 1) % NumPhysPages;
++    }
++}
+diff --git a/code/userprog/addrspace.h b/code/userprog/addrspace.h
+index 58358ae..25e01c9 100644
+--- a/code/userprog/addrspace.h
++++ b/code/userprog/addrspace.h
+@@ -39,19 +39,38 @@ class AddrSpace {
+     ExceptionType Translate(unsigned int vaddr, unsigned int *paddr, int mode);
+     bool HandlePageFault(int badVAddr);
+     // void InitRegisters();
++    friend int AllocateFrame(AddrSpace *space, unsigned int vpn);
++    friend int SelectVictimFrame();
+    private:
++    struct PageInfo {
++        bool hasSwapCopy;
++        bool isReadOnly;
++    };
++
+     TranslationEntry *pageTable;  // Assume linear page table translation
+                                   // for now!
+     unsigned int numPages;        // Number of pages in the virtual
+                                   // address space
+     OpenFile *executable;
+     NoffHeader noffHeader;
++    OpenFile *swapFile;
++    char *swapFileName;
++    PageInfo *pageInfo;
+ 
+     void InitRegisters();  // Initialize user-level CPU registers,
+                            // before jumping to user code
+     bool LoadPage(unsigned int vpn);
+     void LoadSegmentPage(const Segment &segment, unsigned int vpn,
+                          int physicalPage);
++    void LoadFromSwap(unsigned int vpn, int physicalPage);
++    void EvictPage(unsigned int vpn);
++    bool IsPageReadOnly(unsigned int vpn);
++    bool PageOverlapsSegment(const Segment &segment, unsigned int vpn);
++    int SwapOffset(unsigned int vpn);
++    void FlushTlb();
++    void SyncTlbForVpn(unsigned int vpn);
++    void InvalidateTlbForPhysicalPage(int physicalPage);
++    void InstallTlbEntry(unsigned int vpn);
+ };
+ 
+ #endif  // ADDRSPACE_H
+diff --git a/code/userprog/exception.cc b/code/userprog/exception.cc
+index 31c61c5..bbaa124 100644
+--- a/code/userprog/exception.cc
++++ b/code/userprog/exception.cc
+@@ -445,6 +445,7 @@ void ExceptionHandler(ExceptionType which) {
+             if (kernel->currentThread->space != NULL &&
+                 kernel->currentThread->space->HandlePageFault(
+                     kernel->machine->ReadRegister(BadVAddrReg))) {
++                kernel->currentThread->space->RestoreState();
+                 return;
+             }
+             cerr << "Unhandled page fault at "
+diff --git a/code/userprog/noff.h b/code/userprog/noff.h
+index 817e506..fc92902 100644
+--- a/code/userprog/noff.h
++++ b/code/userprog/noff.h
+@@ -5,6 +5,9 @@
+  *	code (read-only), initialized data, and unitialized data
+  */
+ 
++#ifndef NOFF_H
++#define NOFF_H
++
+ #define NOFFMAGIC                            \
+     0xbadfad /* magic number denoting Nachos \
+               * object code file             \
+@@ -27,3 +30,5 @@ typedef struct noffHeader {
+                          * should be zero'ed before use
+                          */
+ } NoffHeader;
++
++#endif

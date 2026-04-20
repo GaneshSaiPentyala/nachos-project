@@ -35,7 +35,12 @@ const int STACK_FENCEPOST = 0xdedbeef;
 
 Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
     has_dynamic_name = _has_dynamic_name;
-    name = threadName;
+    if (has_dynamic_name && threadName != NULL) {
+        name = new char[strlen(threadName) + 1];
+        strcpy(name, threadName);
+    } else {
+        name = threadName;
+    }
     stackTop = NULL;
     stack = NULL;
     status = JUST_CREATED;
@@ -45,6 +50,32 @@ Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
                                  // of machine registers
     }
     space = NULL;
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
+}
+
+Thread::Thread(char *threadName, int pDes, bool _has_dynamic_name /*=false*/) {
+    has_dynamic_name = _has_dynamic_name;
+    if (has_dynamic_name && threadName != NULL) {
+        name = new char[strlen(threadName) + 1];
+        strcpy(name, threadName);
+    } else {
+        name = threadName;
+    }
+    stackTop = NULL;
+    stack = NULL;
+    status = JUST_CREATED;
+    for (int i = 0; i < MachineStateSize; i++) {
+        machineState[i] = NULL;
+    }
+    space = NULL;
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
+    AddPipeDescriptor(pDes);
 }
 
 //----------------------------------------------------------------------
@@ -102,6 +133,39 @@ void Thread::Fork(VoidFunctionPtr func, void *arg) {
     scheduler->ReadyToRun(this);  // ReadyToRun assumes that interrupts
                                   // are disabled!
     (void)interrupt->SetLevel(oldLevel);
+}
+
+bool Thread::AddPipeDescriptor(int desNum) {
+    if (pipeDescriptorCount >= kMaxInheritedPipeDescriptors) return false;
+    pipeDescriptors[pipeDescriptorCount++] = desNum;
+    return true;
+}
+
+void Thread::RemovePipeDescriptor(int desNum) {
+    for (int i = 0; i < pipeDescriptorCount; i++) {
+        if (pipeDescriptors[i] == desNum) {
+            for (int j = i; j + 1 < pipeDescriptorCount; j++) {
+                pipeDescriptors[j] = pipeDescriptors[j + 1];
+            }
+            pipeDescriptors[pipeDescriptorCount - 1] = -1;
+            pipeDescriptorCount--;
+            return;
+        }
+    }
+}
+
+int Thread::GetPipeDescriptor(int index) const {
+    if (index < 0 || index >= pipeDescriptorCount) return -1;
+    return pipeDescriptors[index];
+}
+
+int Thread::GetPipeDescriptorCount() const { return pipeDescriptorCount; }
+
+void Thread::ClearPipeDescriptors() {
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
 }
 
 //----------------------------------------------------------------------

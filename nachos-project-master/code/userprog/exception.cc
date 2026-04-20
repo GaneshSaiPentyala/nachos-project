@@ -64,7 +64,14 @@ char* stringUser2System(int addr, int convert_length = -1) {
 
     do {
         int oneChar;
-        kernel->machine->ReadMem(addr + length, 1, &oneChar);
+        bool ok = false;
+        for (int tries = 0; tries < 3; tries++) {
+            if (kernel->machine->ReadMem(addr + length, 1, &oneChar)) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) return NULL;
         length++;
         // if convert_length == -1, we use '\0' to terminate the process
         // otherwise, we use convert_length to terminate the process
@@ -75,8 +82,17 @@ char* stringUser2System(int addr, int convert_length = -1) {
     str = new char[length];
     for (int i = 0; i < length; i++) {
         int oneChar;
-        kernel->machine->ReadMem(addr + i, 1,
-                                 &oneChar);  // copy characters to kernel space
+        bool ok = false;
+        for (int tries = 0; tries < 3; tries++) {
+            if (kernel->machine->ReadMem(addr + i, 1, &oneChar)) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) {
+            delete[] str;
+            return NULL;
+        }
         str[i] = (unsigned char)oneChar;
     }
     return str;
@@ -94,10 +110,13 @@ char* stringUser2System(int addr, int convert_length = -1) {
 void StringSys2User(char* str, int addr, int convert_length = -1) {
     int length = (convert_length == -1 ? strlen(str) : convert_length);
     for (int i = 0; i < length; i++) {
-        kernel->machine->WriteMem(addr + i, 1,
-                                  str[i]);  // copy characters to user space
+        for (int tries = 0; tries < 3; tries++) {
+            if (kernel->machine->WriteMem(addr + i, 1, str[i])) break;
+        }
     }
-    kernel->machine->WriteMem(addr + length, 1, '\0');
+    for (int tries = 0; tries < 3; tries++) {
+        if (kernel->machine->WriteMem(addr + length, 1, '\0')) break;
+    }
 }
 
 /**
@@ -313,6 +332,57 @@ void handle_SC_Exec() {
     return move_program_counter();
 }
 
+void handle_SC_ExecP() {
+    int virtAddr = kernel->machine->ReadRegister(4);
+    int pDes = kernel->machine->ReadRegister(5);
+    char *name = stringUser2System(virtAddr);
+
+    if (name == NULL) {
+        DEBUG(dbgSys, "\n Not enough memory in System");
+        kernel->machine->WriteRegister(2, -1);
+        return move_program_counter();
+    }
+
+    kernel->machine->WriteRegister(2, SysExecP(name, pDes));
+    delete[] name;
+    return move_program_counter();
+}
+
+void handle_SC_ExecPV() {
+    int virtAddr = kernel->machine->ReadRegister(4);
+    int fdsAddr = kernel->machine->ReadRegister(5);
+    int fdCount = kernel->machine->ReadRegister(6);
+    char *name = stringUser2System(virtAddr);
+
+    if (name == NULL || fdCount < 0 ||
+        fdCount > Thread::kMaxInheritedPipeDescriptors) {
+        kernel->machine->WriteRegister(2, -1);
+        delete[] name;
+        return move_program_counter();
+    }
+
+    int *fds = new int[fdCount];
+    bool ok = true;
+    for (int i = 0; i < fdCount; i++) {
+        int fdValue = -1;
+        if (!kernel->machine->ReadMem(fdsAddr + i * 4, 4, &fdValue)) {
+            ok = false;
+            break;
+        }
+        fds[i] = fdValue;
+    }
+
+    if (!ok) {
+        kernel->machine->WriteRegister(2, -1);
+    } else {
+        kernel->machine->WriteRegister(2, SysExecPV(name, fds, fdCount));
+    }
+
+    delete[] fds;
+    delete[] name;
+    return move_program_counter();
+}
+
 /**
  * @brief handle System Call Join
  * @param id: thread id (get from R4)
@@ -394,6 +464,88 @@ void handle_SC_GetPid() {
     return move_program_counter();
 }
 
+void handle_SC_Pipe() {
+    int readAddr = kernel->machine->ReadRegister(4);
+    int writeAddr = kernel->machine->ReadRegister(5);
+    int readFd = -1;
+    int writeFd = -1;
+    int status = SysPipe(&readFd, &writeFd);
+
+    if (status == 0) {
+        for (int tries = 0; tries < 3; tries++) {
+            if (kernel->machine->WriteMem(readAddr, 4, readFd)) break;
+        }
+        for (int tries = 0; tries < 3; tries++) {
+            if (kernel->machine->WriteMem(writeAddr, 4, writeFd)) break;
+        }
+    }
+
+    kernel->machine->WriteRegister(2, status);
+    return move_program_counter();
+}
+
+void handle_SC_PipeRead() {
+    int desNum = kernel->machine->ReadRegister(4);
+    int bufferAddr = kernel->machine->ReadRegister(5);
+    int charCount = kernel->machine->ReadRegister(6);
+
+    if (charCount < 0) {
+        kernel->machine->WriteRegister(2, -1);
+        return move_program_counter();
+    }
+
+    char *buffer = new char[charCount + 1];
+    int readRes = SysPipeRead(desNum, buffer, charCount);
+    if (readRes >= 0) {
+        buffer[readRes] = '\0';
+        StringSys2User(buffer, bufferAddr, readRes);
+    }
+    kernel->machine->WriteRegister(2, readRes);
+    delete[] buffer;
+    return move_program_counter();
+}
+
+void handle_SC_PipeWrite() {
+    int desNum = kernel->machine->ReadRegister(4);
+    int bufferAddr = kernel->machine->ReadRegister(5);
+    int charCount = kernel->machine->ReadRegister(6);
+
+    char *buffer = stringUser2System(bufferAddr, charCount);
+    if (buffer == NULL) {
+        kernel->machine->WriteRegister(2, -1);
+        return move_program_counter();
+    }
+
+    kernel->machine->WriteRegister(2, SysPipeWrite(desNum, buffer, charCount));
+    delete[] buffer;
+    return move_program_counter();
+}
+
+void handle_SC_ReadInt() {
+    int virtAddr = kernel->machine->ReadRegister(4);
+    char *buffer = stringUser2System(virtAddr, sizeof(int));
+    int value = 0;
+
+    if (buffer != NULL) {
+        memcpy(&value, buffer, sizeof(int));
+        delete[] buffer;
+    }
+
+    kernel->machine->WriteRegister(2, value);
+    return move_program_counter();
+}
+
+void handle_SC_GetPD() {
+    int index = kernel->machine->ReadRegister(4);
+    kernel->machine->WriteRegister(2, SysGetPD(index));
+    return move_program_counter();
+}
+
+void handle_SC_GetPDCount() {
+    kernel->machine->WriteRegister(2, SysGetPDCount());
+    return move_program_counter();
+}
+
 void ExceptionHandler(ExceptionType which) {
     int type = kernel->machine->ReadRegister(2);
 
@@ -405,6 +557,16 @@ void ExceptionHandler(ExceptionType which) {
             DEBUG(dbgSys, "Switch to system mode\n");
             break;
         case PageFaultException:
+            if (kernel->currentThread->space != NULL &&
+                kernel->currentThread->space->HandlePageFault(
+                    kernel->machine->ReadRegister(BadVAddrReg))) {
+                kernel->currentThread->space->RestoreState();
+                return;
+            }
+            cerr << "Unhandled page fault at "
+                 << kernel->machine->ReadRegister(BadVAddrReg) << "\n";
+            SysHalt();
+            ASSERTNOTREACHED();
         case ReadOnlyException:
         case BusErrorException:
         case AddressErrorException:
@@ -461,6 +623,22 @@ void ExceptionHandler(ExceptionType which) {
                     return handle_SC_Signal();
                 case SC_GetPid:
                     return handle_SC_GetPid();
+                case SC_Pipe:
+                    return handle_SC_Pipe();
+                case SC_PipeRead:
+                    return handle_SC_PipeRead();
+                case SC_PipeWrite:
+                    return handle_SC_PipeWrite();
+                case SC_ExecP:
+                    return handle_SC_ExecP();
+                case SC_ExecPV:
+                    return handle_SC_ExecPV();
+                case SC_ReadInt:
+                    return handle_SC_ReadInt();
+                case SC_GetPD:
+                    return handle_SC_GetPD();
+                case SC_GetPDCount:
+                    return handle_SC_GetPDCount();
                 /**
                  * Handle all not implemented syscalls
                  * If you want to write a new handler for syscall:

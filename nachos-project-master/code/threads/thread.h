@@ -80,7 +80,10 @@ class Thread {
     bool has_dynamic_name;  // true if the thread name is dynamically allocated
 
    public:
+    static const int kMaxInheritedPipeDescriptors = 16;
     Thread(char *debugName,
+           bool _has_dynamic_name = false);  // initialize a Thread
+    Thread(char *debugName, int pDes,
            bool _has_dynamic_name = false);  // initialize a Thread
     ~Thread();                               // deallocate a Thread
                                              // NOTE -- thread being deleted
@@ -93,6 +96,11 @@ class Thread {
     void FreeSpace() {
         if (space != 0) delete space;
     }
+    bool AddPipeDescriptor(int desNum);
+    void RemovePipeDescriptor(int desNum);
+    int GetPipeDescriptor(int index) const;
+    int GetPipeDescriptorCount() const;
+    void ClearPipeDescriptors();
 
     // basic thread operations
 
@@ -129,6 +137,8 @@ class Thread {
     // executing kernel code.
 
     int userRegisters[NumTotalRegs];  // user-level CPU register state
+    int pipeDescriptors[kMaxInheritedPipeDescriptors];
+    int pipeDescriptorCount;
 
    public:
     void SaveUserState();     // save user-level register state

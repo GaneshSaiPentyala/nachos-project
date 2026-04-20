@@ -19,8 +19,20 @@
 #include "main.h"
 #include "addrspace.h"
 #include "machine.h"
-#include "noff.h"
 #include "synch.h"
+
+struct FrameRecord {
+    AddrSpace *owner;
+    unsigned int vpn;
+    bool occupied;
+};
+
+static FrameRecord gFrameTable[NumPhysPages];
+static unsigned int gClockHand = 0;
+static unsigned int gTlbHand = 0;
+
+int AllocateFrame(AddrSpace *space, unsigned int vpn);
+int SelectVictimFrame();
 
 //----------------------------------------------------------------------
 // SwapHeader
@@ -64,18 +76,13 @@ static void SwapHeader(NoffHeader *noffH) {
 //----------------------------------------------------------------------
 
 AddrSpace::AddrSpace() {
-    // pageTable = new TranslationEntry[NumPhysPages];
-    // for (int i = 0; i < NumPhysPages; i++) {
-    //     pageTable[i].virtualPage = i;  // for now, virt page # = phys page #
-    //     pageTable[i].physicalPage = i;
-    //     pageTable[i].valid = TRUE;
-    //     pageTable[i].use = FALSE;
-    //     pageTable[i].dirty = FALSE;
-    //     pageTable[i].readOnly = FALSE;
-    // }
-
-    // // zero out the entire address space
-    // bzero(kernel->machine->mainMemory, MemorySize);
+    pageTable = NULL;
+    numPages = 0;
+    executable = NULL;
+    swapFile = NULL;
+    swapFileName = NULL;
+    pageInfo = NULL;
+    bzero(&noffHeader, sizeof(noffHeader));
 }
 
 //----------------------------------------------------------------------
@@ -86,9 +93,21 @@ AddrSpace::AddrSpace() {
 AddrSpace::~AddrSpace() {
     int i;
     for (i = 0; i < numPages; i++) {
-        kernel->gPhysPageBitMap->Clear(pageTable[i].physicalPage);
+        if (pageTable[i].valid && pageTable[i].physicalPage >= 0) {
+            InvalidateTlbForPhysicalPage(pageTable[i].physicalPage);
+            kernel->gPhysPageBitMap->Clear(pageTable[i].physicalPage);
+            gFrameTable[pageTable[i].physicalPage].occupied = false;
+            gFrameTable[pageTable[i].physicalPage].owner = NULL;
+        }
     }
     delete[] pageTable;
+    delete[] pageInfo;
+    delete executable;
+    delete swapFile;
+    if (swapFileName != NULL) {
+        kernel->fileSystem->Remove(swapFileName);
+        delete[] swapFileName;
+    }
 }
 
 //----------------------------------------------------------------------
@@ -102,85 +121,54 @@ AddrSpace::~AddrSpace() {
 //----------------------------------------------------------------------
 
 AddrSpace::AddrSpace(char *fileName) {
-    OpenFile *executable = kernel->fileSystem->Open(fileName);
-    NoffHeader noffH;
-    unsigned int i, size, j, offset;
-    unsigned int numCodePage,
-        numDataPage;  // số trang cho phần code và phần initData
-    int lastCodePageSize, lastDataPageSize, firstDataPageSize,
-        tempDataSize;  // kích thước ghi vào trang cuối Code, initData, và trang
-                       // đầu của initData
+    pageTable = NULL;
+    numPages = 0;
+    executable = kernel->fileSystem->Open(fileName);
+    swapFile = NULL;
+    swapFileName = NULL;
+    pageInfo = NULL;
+
+    unsigned int i, size;
 
     if (executable == NULL) {
         DEBUG(dbgFile, "\n Error opening file.");
         return;
     }
-    //đọc header của file
-    executable->ReadAt((char *)&noffH, sizeof(noffH), 0);
-    if ((noffH.noffMagic != NOFFMAGIC) &&
-        (WordToHost(noffH.noffMagic) == NOFFMAGIC))
-        SwapHeader(&noffH);
-    ASSERT(noffH.noffMagic == NOFFMAGIC);
-    kernel->addrLock->P();
-    // how big is address space?
-    size = noffH.code.size + noffH.initData.size + noffH.uninitData.size +
+
+    executable->ReadAt((char *)&noffHeader, sizeof(noffHeader), 0);
+    if ((noffHeader.noffMagic != NOFFMAGIC) &&
+        (WordToHost(noffHeader.noffMagic) == NOFFMAGIC))
+        SwapHeader(&noffHeader);
+    ASSERT(noffHeader.noffMagic == NOFFMAGIC);
+
+    size = noffHeader.code.size + noffHeader.initData.size +
+           noffHeader.uninitData.size +
            UserStackSize;  // we need to increase the size
                            // to leave room for the stack
     numPages = divRoundUp(size, PageSize);
     size = numPages * PageSize;
 
-    ASSERT(numPages <= NumPhysPages);  // check we're not trying
-                                       // to run anything too big --
-                                       // at least until we have
-                                       // virtual memory
-
-    // Check the available memory enough to load new process
-    // debug
-    if (numPages > kernel->gPhysPageBitMap->NumClear()) {
-        DEBUG(dbgAddr, "Not enough free space");
-        numPages = 0;
-        delete executable;
-        kernel->addrLock->V();
-        return;
-    }
     DEBUG(dbgAddr, "Initializing address space: " << numPages << ", " << size);
-    // first, set up the translation
+
     pageTable = new TranslationEntry[numPages];
+    pageInfo = new PageInfo[numPages];
     for (i = 0; i < numPages; i++) {
-        pageTable[i].virtualPage = i;  // for now, virtual page # = phys page #
-        pageTable[i].physicalPage = kernel->gPhysPageBitMap->FindAndSet();
-        // cerr << pageTable[i].physicalPage << endl;
-        pageTable[i].valid = TRUE;
+        pageTable[i].virtualPage = i;
+        pageTable[i].physicalPage = -1;
+        pageTable[i].valid = FALSE;
         pageTable[i].use = FALSE;
         pageTable[i].dirty = FALSE;
-        pageTable[i].readOnly = FALSE;  // if the code segment was entirely on
-        // a separate page, we could set its
-        // pages to be read-only
-        // xóa các trang này trên memory
-        bzero(&(kernel->machine
-                    ->mainMemory[pageTable[i].physicalPage * PageSize]),
-              PageSize);
-        DEBUG(dbgAddr, "phyPage " << pageTable[i].physicalPage);
+        pageTable[i].readOnly = FALSE;
+        pageInfo[i].hasSwapCopy = false;
+        pageInfo[i].isReadOnly = IsPageReadOnly(i);
     }
 
-    if (noffH.code.size > 0) {
-        for (i = 0; i < numPages; i++)
-            executable->ReadAt(
-                &(kernel->machine->mainMemory[noffH.code.virtualAddr]) +
-                    (pageTable[i].physicalPage * PageSize),
-                PageSize, noffH.code.inFileAddr + (i * PageSize));
-    }
-
-    if (noffH.initData.size > 0) {
-        for (i = 0; i < numPages; i++)
-            executable->ReadAt(
-                &(kernel->machine->mainMemory[noffH.initData.virtualAddr]) +
-                    (pageTable[i].physicalPage * PageSize),
-                PageSize, noffH.initData.inFileAddr + (i * PageSize));
-    }
-
-    kernel->addrLock->V();
-    delete executable;
+    char buffer[64];
+    sprintf(buffer, "nachos.swap.%d.%p", kernel->currentThread->processID, this);
+    swapFileName = new char[strlen(buffer) + 1];
+    strcpy(swapFileName, buffer);
+    kernel->fileSystem->Create(swapFileName);
+    swapFile = kernel->fileSystem->Open(swapFileName);
     return;
 }
 
@@ -258,8 +246,14 @@ void AddrSpace::SaveState() {}
 //----------------------------------------------------------------------
 
 void AddrSpace::RestoreState() {
-    kernel->machine->pageTable = pageTable;
-    kernel->machine->pageTableSize = numPages;
+    if (kernel->machine->tlb != NULL) {
+        FlushTlb();
+        kernel->machine->pageTable = NULL;
+        kernel->machine->pageTableSize = 0;
+    } else {
+        kernel->machine->pageTable = pageTable;
+        kernel->machine->pageTableSize = numPages;
+    }
 }
 
 //----------------------------------------------------------------------
@@ -282,6 +276,10 @@ ExceptionType AddrSpace::Translate(unsigned int vaddr, unsigned int *paddr,
     }
 
     pte = &pageTable[vpn];
+
+    if (!pte->valid) {
+        return PageFaultException;
+    }
 
     if (isReadWrite && pte->readOnly) {
         return ReadOnlyException;
@@ -308,4 +306,237 @@ ExceptionType AddrSpace::Translate(unsigned int vaddr, unsigned int *paddr,
     //  ", paddr: " << *paddr << "\n";
 
     return NoException;
+}
+
+bool AddrSpace::HandlePageFault(int badVAddr) {
+    if (badVAddr < 0) return false;
+    unsigned int vpn = ((unsigned int)badVAddr) / PageSize;
+
+    if (vpn >= numPages) return false;
+    if (pageTable[vpn].valid) {
+        InstallTlbEntry(vpn);
+        return true;
+    }
+    return LoadPage(vpn);
+}
+
+bool AddrSpace::LoadPage(unsigned int vpn) {
+    kernel->addrLock->P();
+
+    if (pageTable[vpn].valid) {
+        kernel->addrLock->V();
+        return true;
+    }
+
+    int physicalPage = AllocateFrame(this, vpn);
+    ASSERT(physicalPage >= 0);
+
+    bzero(&(kernel->machine->mainMemory[physicalPage * PageSize]), PageSize);
+
+    if (pageInfo[vpn].hasSwapCopy) {
+        LoadFromSwap(vpn, physicalPage);
+    } else {
+        LoadSegmentPage(noffHeader.code, vpn, physicalPage);
+#ifdef RDATA
+        LoadSegmentPage(noffHeader.readonlyData, vpn, physicalPage);
+#endif
+        LoadSegmentPage(noffHeader.initData, vpn, physicalPage);
+    }
+
+    pageTable[vpn].physicalPage = physicalPage;
+    pageTable[vpn].valid = TRUE;
+    pageTable[vpn].use = FALSE;
+    pageTable[vpn].dirty = FALSE;
+    pageTable[vpn].readOnly = pageInfo[vpn].isReadOnly &&
+                              !pageInfo[vpn].hasSwapCopy;
+
+    gFrameTable[physicalPage].occupied = true;
+    gFrameTable[physicalPage].owner = this;
+    gFrameTable[physicalPage].vpn = vpn;
+
+    InstallTlbEntry(vpn);
+
+    kernel->addrLock->V();
+    return true;
+}
+
+void AddrSpace::LoadSegmentPage(const Segment &segment, unsigned int vpn,
+                                int physicalPage) {
+    if (segment.size == 0) return;
+
+    unsigned int pageStart = vpn * PageSize;
+    unsigned int pageEnd = pageStart + PageSize;
+    unsigned int segmentStart = segment.virtualAddr;
+    unsigned int segmentEnd = segment.virtualAddr + segment.size;
+
+    if (pageEnd <= segmentStart || pageStart >= segmentEnd) return;
+
+    unsigned int copyStart =
+        (pageStart > segmentStart) ? pageStart : segmentStart;
+    unsigned int copyEnd = (pageEnd < segmentEnd) ? pageEnd : segmentEnd;
+    unsigned int copySize = copyEnd - copyStart;
+    int inFileOffset = segment.inFileAddr + (copyStart - segmentStart);
+    char *destination = &(kernel->machine->mainMemory[physicalPage * PageSize +
+                                                      (copyStart - pageStart)]);
+
+    executable->ReadAt(destination, copySize, inFileOffset);
+}
+
+void AddrSpace::LoadFromSwap(unsigned int vpn, int physicalPage) {
+    ASSERT(swapFile != NULL);
+    swapFile->ReadAt(&kernel->machine->mainMemory[physicalPage * PageSize],
+                     PageSize, SwapOffset(vpn));
+}
+
+void AddrSpace::EvictPage(unsigned int vpn) {
+    SyncTlbForVpn(vpn);
+
+    TranslationEntry *pte = &pageTable[vpn];
+    int physicalPage = pte->physicalPage;
+    if (physicalPage < 0) return;
+
+    if (pte->dirty) {
+        ASSERT(swapFile != NULL);
+        swapFile->WriteAt(&kernel->machine->mainMemory[physicalPage * PageSize],
+                          PageSize, SwapOffset(vpn));
+        pageInfo[vpn].hasSwapCopy = true;
+    }
+
+    InvalidateTlbForPhysicalPage(physicalPage);
+    pte->valid = FALSE;
+    pte->physicalPage = -1;
+    pte->use = FALSE;
+    pte->dirty = FALSE;
+    pte->readOnly = pageInfo[vpn].isReadOnly && !pageInfo[vpn].hasSwapCopy;
+}
+
+bool AddrSpace::IsPageReadOnly(unsigned int vpn) {
+    bool overlapsWritable =
+        PageOverlapsSegment(noffHeader.initData, vpn) ||
+        PageOverlapsSegment(noffHeader.uninitData, vpn);
+    if (overlapsWritable) return false;
+
+    if (PageOverlapsSegment(noffHeader.code, vpn)) return true;
+#ifdef RDATA
+    if (PageOverlapsSegment(noffHeader.readonlyData, vpn)) return true;
+#endif
+    return false;
+}
+
+bool AddrSpace::PageOverlapsSegment(const Segment &segment, unsigned int vpn) {
+    if (segment.size <= 0) return false;
+
+    unsigned int pageStart = vpn * PageSize;
+    unsigned int pageEnd = pageStart + PageSize;
+    unsigned int segmentStart = segment.virtualAddr;
+    unsigned int segmentEnd = segment.virtualAddr + segment.size;
+
+    return !(pageEnd <= segmentStart || pageStart >= segmentEnd);
+}
+
+int AddrSpace::SwapOffset(unsigned int vpn) { return vpn * PageSize; }
+
+void AddrSpace::FlushTlb() {
+    if (kernel->machine->tlb == NULL) return;
+
+    for (int i = 0; i < TLBSize; i++) {
+        if (kernel->machine->tlb[i].valid) {
+            unsigned int vpn = kernel->machine->tlb[i].virtualPage;
+            if (vpn < numPages) {
+                pageTable[vpn].use =
+                    pageTable[vpn].use || kernel->machine->tlb[i].use;
+                pageTable[vpn].dirty =
+                    pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
+            }
+            kernel->machine->tlb[i].valid = FALSE;
+        }
+    }
+}
+
+void AddrSpace::SyncTlbForVpn(unsigned int vpn) {
+    if (kernel->machine->tlb == NULL) return;
+
+    for (int i = 0; i < TLBSize; i++) {
+        if (kernel->machine->tlb[i].valid &&
+            kernel->machine->tlb[i].virtualPage == (int)vpn) {
+            pageTable[vpn].use = pageTable[vpn].use || kernel->machine->tlb[i].use;
+            pageTable[vpn].dirty =
+                pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
+            kernel->machine->tlb[i].valid = FALSE;
+        }
+    }
+}
+
+void AddrSpace::InvalidateTlbForPhysicalPage(int physicalPage) {
+    if (kernel->machine->tlb == NULL) return;
+
+    for (int i = 0; i < TLBSize; i++) {
+        if (kernel->machine->tlb[i].valid &&
+            kernel->machine->tlb[i].physicalPage == physicalPage) {
+            unsigned int vpn = kernel->machine->tlb[i].virtualPage;
+            if (vpn < numPages) {
+                pageTable[vpn].use = pageTable[vpn].use || kernel->machine->tlb[i].use;
+                pageTable[vpn].dirty =
+                    pageTable[vpn].dirty || kernel->machine->tlb[i].dirty;
+            }
+            kernel->machine->tlb[i].valid = FALSE;
+        }
+    }
+}
+
+void AddrSpace::InstallTlbEntry(unsigned int vpn) {
+    if (kernel->machine->tlb == NULL) return;
+
+    int slot = gTlbHand % TLBSize;
+    gTlbHand = (gTlbHand + 1) % TLBSize;
+
+    if (kernel->machine->tlb[slot].valid) {
+        unsigned int oldVpn = kernel->machine->tlb[slot].virtualPage;
+        if (oldVpn < numPages) {
+            pageTable[oldVpn].use = pageTable[oldVpn].use || kernel->machine->tlb[slot].use;
+            pageTable[oldVpn].dirty =
+                pageTable[oldVpn].dirty || kernel->machine->tlb[slot].dirty;
+        }
+    }
+
+    kernel->machine->tlb[slot] = pageTable[vpn];
+    kernel->machine->tlb[slot].valid = TRUE;
+}
+
+int AllocateFrame(AddrSpace *space, unsigned int vpn) {
+    int physicalPage = kernel->gPhysPageBitMap->FindAndSet();
+    if (physicalPage != -1) return physicalPage;
+
+    physicalPage = SelectVictimFrame();
+    ASSERT(physicalPage >= 0);
+    ASSERT(gFrameTable[physicalPage].occupied);
+    ASSERT(gFrameTable[physicalPage].owner != NULL);
+
+    gFrameTable[physicalPage].owner->EvictPage(gFrameTable[physicalPage].vpn);
+    return physicalPage;
+}
+
+int SelectVictimFrame() {
+    for (;;) {
+        FrameRecord *record = &gFrameTable[gClockHand];
+
+        if (!record->occupied) {
+            int frame = gClockHand;
+            gClockHand = (gClockHand + 1) % NumPhysPages;
+            return frame;
+        }
+
+        TranslationEntry *pte =
+            &record->owner->pageTable[record->vpn];
+        record->owner->SyncTlbForVpn(record->vpn);
+
+        if (!pte->use) {
+            int victim = gClockHand;
+            gClockHand = (gClockHand + 1) % NumPhysPages;
+            return victim;
+        }
+
+        pte->use = FALSE;
+        gClockHand = (gClockHand + 1) % NumPhysPages;
+    }
 }

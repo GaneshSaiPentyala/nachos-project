@@ -1,0 +1,712 @@
+diff --git a/code/build.linux/Makefile b/code/build.linux/Makefile
+index 3def870..8762e3b 100644
+--- a/code/build.linux/Makefile
++++ b/code/build.linux/Makefile
+@@ -275,6 +275,7 @@ THREAD_H = ../threads/alarm.h\
+ 	../threads/pcb.h\
+ 	../threads/stable.h\
+ 	../threads/sem.h\
++	../threads/pipe.h\
+ 
+ THREAD_C = ../threads/alarm.cc\
+ 	../threads/kernel.cc\
+@@ -287,8 +288,9 @@ THREAD_C = ../threads/alarm.cc\
+ 	../threads/pcb.cc\
+ 	../threads/stable.cc\
+ 	../threads/sem.cc\
++	../threads/pipe.cc\
+ 
+-THREAD_O = alarm.o kernel.o main.o scheduler.o synch.o thread.o ptable.o pcb.o stable.o sem.o
++THREAD_O = alarm.o kernel.o main.o scheduler.o synch.o thread.o ptable.o pcb.o stable.o sem.o pipe.o
+ 
+ USERPROG_H = ../userprog/addrspace.h\
+ 	../userprog/syscall.h\
+diff --git a/code/test/Makefile b/code/test/Makefile
+index 2d0e84c..fd73e1e 100644
+--- a/code/test/Makefile
++++ b/code/test/Makefile
+@@ -112,7 +112,7 @@ ifeq ($(hosttype),unknown)
+ PROGRAMS = unknownhost
+ else
+ # change this if you create a new test program!
+-PROGRAMS = add halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
++PROGRAMS = pipe_parent pipe_child add halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
+ endif
+ 
+ all: $(PROGRAMS)
+@@ -253,6 +253,20 @@ main: main.o start.o
+ 	$(LD) $(LDFLAGS) start.o main.o -o main.coff
+ 	$(COFF2NOFF) main.coff main
+ 
++pipe_parent.o: pipe_parent.c
++	$(CC) $(CFLAGS) -c pipe_parent.c
++
++pipe_parent: pipe_parent.o start.o
++	$(LD) $(LDFLAGS) start.o pipe_parent.o -o pipe_parent.coff
++	$(COFF2NOFF) pipe_parent.coff pipe_parent
++
++pipe_child.o: pipe_child.c
++	$(CC) $(CFLAGS) -c pipe_child.c
++
++pipe_child: pipe_child.o start.o
++	$(LD) $(LDFLAGS) start.o pipe_child.o -o pipe_child.coff
++	$(COFF2NOFF) pipe_child.coff pipe_child
++
+ clean:
+ 	$(RM) -f *.o *.ii
+ 	$(RM) -f *.coff
+diff --git a/code/threads/kernel.cc b/code/threads/kernel.cc
+index 7136b45..e87434c 100644
+--- a/code/threads/kernel.cc
++++ b/code/threads/kernel.cc
+@@ -96,6 +96,7 @@ void Kernel::Initialize(char *userProgName /*=NULL*/) {
+     scheduler = new Scheduler();     // initialize the ready queue
+     alarm = new Alarm(randomSlice);  // start up time slicing
+     machine = new Machine(debugUserProg);
++    pipeDes = new PipeDescriptors();
+     synchConsoleIn = new SynchConsoleInput(consoleIn);     // input from stdin
+     synchConsoleOut = new SynchConsoleOutput(consoleOut);  // output to stdout
+     synchDisk = new SynchDisk();                           //
+@@ -130,6 +131,7 @@ Kernel::~Kernel() {
+     delete synchConsoleOut;
+     delete synchDisk;
+     delete fileSystem;
++    delete pipeDes;
+     delete postOfficeIn;
+     delete postOfficeOut;
+     delete pTab;
+diff --git a/code/threads/kernel.h b/code/threads/kernel.h
+index 7e5e030..520c2c7 100644
+--- a/code/threads/kernel.h
++++ b/code/threads/kernel.h
+@@ -18,6 +18,7 @@
+ #include "alarm.h"
+ #include "filesys.h"
+ #include "machine.h"
++#include "pipe.h"
+ 
+ class PostOfficeInput;
+ class PostOfficeOutput;
+@@ -61,6 +62,7 @@ class Kernel {
+     FileSystem *fileSystem;
+     PostOfficeInput *postOfficeIn;
+     PostOfficeOutput *postOfficeOut;
++    PipeDescriptors *pipeDes;
+ 
+     Semaphore *addrLock;
+     Bitmap *gPhysPageBitMap;
+diff --git a/code/threads/pcb.cc b/code/threads/pcb.cc
+index a740854..f5ac8fa 100644
+--- a/code/threads/pcb.cc
++++ b/code/threads/pcb.cc
+@@ -6,6 +6,9 @@ PCB::PCB(int id) {
+     joinsem = new Semaphore("joinsem", 0);
+     exitsem = new Semaphore("exitsem", 0);
+     multex = new Semaphore("multex", 1);
++    thread = NULL;
++    numwait = 0;
++    exitcode = 0;
+ }
+ 
+ PCB::~PCB() {
+@@ -19,7 +22,6 @@ PCB::~PCB() {
+         // delete thread;
+     }
+ 
+-    delete[] filename;
+ }
+ 
+ void StartProcess_2(void* pid) {
+@@ -76,6 +78,37 @@ int PCB::Exec(char* filename, int id) {
+     return id;
+ }
+ 
++int PCB::Exec(char *filename, int id, int pDes) {
++    return Exec(filename, id, &pDes, 1);
++}
++
++int PCB::Exec(char *filename, int id, int *pDes, int pDesCount) {
++    multex->P();
++
++    this->thread = new Thread(filename, true);
++    if (this->thread == NULL) {
++        printf("\nPCB::Exec: Not enough memory!\n");
++        multex->V();
++        return -1;
++    }
++
++    for (int i = 0; i < pDesCount; i++) {
++        if (!this->thread->AddPipeDescriptor(pDes[i])) {
++            delete this->thread;
++            this->thread = NULL;
++            multex->V();
++            return -1;
++        }
++    }
++
++    this->thread->processID = id;
++    this->parentID = kernel->currentThread->processID;
++    this->thread->Fork(StartProcess_2, &this->thread->processID);
++
++    multex->V();
++    return id;
++}
++
+ int PCB::GetID() { return thread->processID; }
+ 
+ int PCB::GetNumWait() { return numwait; }
+diff --git a/code/threads/pcb.h b/code/threads/pcb.h
+index dcab368..1368989 100644
+--- a/code/threads/pcb.h
++++ b/code/threads/pcb.h
+@@ -21,6 +21,8 @@ class PCB {
+     ~PCB();
+ 
+     int Exec(char *filename, int pid);
++    int Exec(char *filename, int pid, int pDes);
++    int Exec(char *filename, int pid, int *pDes, int pDesCount);
+     int GetID();
+     int GetNumWait();
+ 
+diff --git a/code/threads/ptable.cc b/code/threads/ptable.cc
+index 89f8486..95cac21 100644
+--- a/code/threads/ptable.cc
++++ b/code/threads/ptable.cc
+@@ -68,6 +68,67 @@ int PTable::ExecUpdate(char* name) {
+     return pid;
+ }
+ 
++int PTable::ExecUpdate(char *name, int pDes) {
++    return ExecUpdate(name, &pDes, 1);
++}
++
++int PTable::ExecUpdate(char *name, int *pDes, int pDesCount) {
++    bmsem->P();
++
++    if (name == NULL) {
++        DEBUG(dbgSys, "\nPTable::Exec : Can't not execute name is NULL.\n");
++        bmsem->V();
++        return -1;
++    }
++    if (strcmp(name, kernel->currentThread->getName()) == 0) {
++        DEBUG(dbgSys, "\nPTable::Exec : Can't not execute itself.\n");
++        bmsem->V();
++        return -1;
++    }
++
++    int index = this->GetFreeSlot();
++    if (index < 0) {
++        DEBUG(dbgSys, "\nPTable::Exec :There is no free slot.\n");
++        bmsem->V();
++        return -1;
++    }
++
++    pcb[index] = new PCB(index);
++    pcb[index]->SetFileName(name);
++    kernel->fileSystem->Renew(index);
++    pcb[index]->parentID = kernel->currentThread->processID;
++
++    int childPipeDescriptors[Thread::kMaxInheritedPipeDescriptors];
++    int childPipeCount = 0;
++
++    for (int i = 0; i < pDesCount; i++) {
++        int childDescriptor = -1;
++        if (kernel->pipeDes->duplicateDesToProcess(pDes[i], index,
++                                                   &childDescriptor) != 0) {
++            for (int j = 0; j < childPipeCount; j++) {
++                kernel->pipeDes->closeDes(childPipeDescriptors[j]);
++            }
++            delete pcb[index];
++            pcb[index] = NULL;
++            bmsem->V();
++            return -1;
++        }
++        childPipeDescriptors[childPipeCount++] = childDescriptor;
++    }
++
++    int pid = pcb[index]->Exec(name, index, childPipeDescriptors, childPipeCount);
++    if (pid < 0) {
++        for (int i = 0; i < childPipeCount; i++) {
++            kernel->pipeDes->closeDes(childPipeDescriptors[i]);
++        }
++        delete pcb[index];
++        pcb[index] = NULL;
++    }
++
++    bmsem->V();
++    return pid;
++}
++
+ int PTable::ExitUpdate(int exitcode) {
+     // Nếu tiến trình gọi là main process thì gọi Halt().
+     int id = kernel->currentThread->processID;
+diff --git a/code/threads/ptable.h b/code/threads/ptable.h
+index 23b2f46..af5f26e 100644
+--- a/code/threads/ptable.h
++++ b/code/threads/ptable.h
+@@ -17,6 +17,8 @@ class PTable {
+     PTable(int size);
+     ~PTable();
+     int ExecUpdate(char* name);
++    int ExecUpdate(char* name, int pDes);
++    int ExecUpdate(char* name, int *pDes, int pDesCount);
+     int ExitUpdate(int ec);
+     int JoinUpdate(int id);
+     int GetFreeSlot();
+@@ -25,4 +27,4 @@ class PTable {
+     char* GetFileName(int id);
+ };
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/code/threads/thread.cc b/code/threads/thread.cc
+index be9f7d6..ff25e1b 100644
+--- a/code/threads/thread.cc
++++ b/code/threads/thread.cc
+@@ -35,7 +35,12 @@ const int STACK_FENCEPOST = 0xdedbeef;
+ 
+ Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
+     has_dynamic_name = _has_dynamic_name;
+-    name = threadName;
++    if (has_dynamic_name && threadName != NULL) {
++        name = new char[strlen(threadName) + 1];
++        strcpy(name, threadName);
++    } else {
++        name = threadName;
++    }
+     stackTop = NULL;
+     stack = NULL;
+     status = JUST_CREATED;
+@@ -45,6 +50,32 @@ Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
+                                  // of machine registers
+     }
+     space = NULL;
++    pipeDescriptorCount = 0;
++    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
++        pipeDescriptors[i] = -1;
++    }
++}
++
++Thread::Thread(char *threadName, int pDes, bool _has_dynamic_name /*=false*/) {
++    has_dynamic_name = _has_dynamic_name;
++    if (has_dynamic_name && threadName != NULL) {
++        name = new char[strlen(threadName) + 1];
++        strcpy(name, threadName);
++    } else {
++        name = threadName;
++    }
++    stackTop = NULL;
++    stack = NULL;
++    status = JUST_CREATED;
++    for (int i = 0; i < MachineStateSize; i++) {
++        machineState[i] = NULL;
++    }
++    space = NULL;
++    pipeDescriptorCount = 0;
++    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
++        pipeDescriptors[i] = -1;
++    }
++    AddPipeDescriptor(pDes);
+ }
+ 
+ //----------------------------------------------------------------------
+@@ -104,6 +135,39 @@ void Thread::Fork(VoidFunctionPtr func, void *arg) {
+     (void)interrupt->SetLevel(oldLevel);
+ }
+ 
++bool Thread::AddPipeDescriptor(int desNum) {
++    if (pipeDescriptorCount >= kMaxInheritedPipeDescriptors) return false;
++    pipeDescriptors[pipeDescriptorCount++] = desNum;
++    return true;
++}
++
++void Thread::RemovePipeDescriptor(int desNum) {
++    for (int i = 0; i < pipeDescriptorCount; i++) {
++        if (pipeDescriptors[i] == desNum) {
++            for (int j = i; j + 1 < pipeDescriptorCount; j++) {
++                pipeDescriptors[j] = pipeDescriptors[j + 1];
++            }
++            pipeDescriptors[pipeDescriptorCount - 1] = -1;
++            pipeDescriptorCount--;
++            return;
++        }
++    }
++}
++
++int Thread::GetPipeDescriptor(int index) const {
++    if (index < 0 || index >= pipeDescriptorCount) return -1;
++    return pipeDescriptors[index];
++}
++
++int Thread::GetPipeDescriptorCount() const { return pipeDescriptorCount; }
++
++void Thread::ClearPipeDescriptors() {
++    pipeDescriptorCount = 0;
++    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
++        pipeDescriptors[i] = -1;
++    }
++}
++
+ //----------------------------------------------------------------------
+ // Thread::CheckOverflow
+ // 	Check a thread's stack to see if it has overrun the space
+diff --git a/code/threads/thread.h b/code/threads/thread.h
+index 3fbf156..14f1d69 100644
+--- a/code/threads/thread.h
++++ b/code/threads/thread.h
+@@ -80,8 +80,11 @@ class Thread {
+     bool has_dynamic_name;  // true if the thread name is dynamically allocated
+ 
+    public:
++    static const int kMaxInheritedPipeDescriptors = 16;
+     Thread(char *debugName,
+            bool _has_dynamic_name = false);  // initialize a Thread
++    Thread(char *debugName, int pDes,
++           bool _has_dynamic_name = false);  // initialize a Thread
+     ~Thread();                               // deallocate a Thread
+                                              // NOTE -- thread being deleted
+                                              // must not be running when delete
+@@ -93,6 +96,11 @@ class Thread {
+     void FreeSpace() {
+         if (space != 0) delete space;
+     }
++    bool AddPipeDescriptor(int desNum);
++    void RemovePipeDescriptor(int desNum);
++    int GetPipeDescriptor(int index) const;
++    int GetPipeDescriptorCount() const;
++    void ClearPipeDescriptors();
+ 
+     // basic thread operations
+ 
+@@ -129,6 +137,8 @@ class Thread {
+     // executing kernel code.
+ 
+     int userRegisters[NumTotalRegs];  // user-level CPU register state
++    int pipeDescriptors[kMaxInheritedPipeDescriptors];
++    int pipeDescriptorCount;
+ 
+    public:
+     void SaveUserState();     // save user-level register state
+diff --git a/code/userprog/exception.cc b/code/userprog/exception.cc
+index 31c61c5..c40b94c 100644
+--- a/code/userprog/exception.cc
++++ b/code/userprog/exception.cc
+@@ -332,6 +332,57 @@ void handle_SC_Exec() {
+     return move_program_counter();
+ }
+ 
++void handle_SC_ExecP() {
++    int virtAddr = kernel->machine->ReadRegister(4);
++    int pDes = kernel->machine->ReadRegister(5);
++    char *name = stringUser2System(virtAddr);
++
++    if (name == NULL) {
++        DEBUG(dbgSys, "\n Not enough memory in System");
++        kernel->machine->WriteRegister(2, -1);
++        return move_program_counter();
++    }
++
++    kernel->machine->WriteRegister(2, SysExecP(name, pDes));
++    delete[] name;
++    return move_program_counter();
++}
++
++void handle_SC_ExecPV() {
++    int virtAddr = kernel->machine->ReadRegister(4);
++    int fdsAddr = kernel->machine->ReadRegister(5);
++    int fdCount = kernel->machine->ReadRegister(6);
++    char *name = stringUser2System(virtAddr);
++
++    if (name == NULL || fdCount < 0 ||
++        fdCount > Thread::kMaxInheritedPipeDescriptors) {
++        kernel->machine->WriteRegister(2, -1);
++        delete[] name;
++        return move_program_counter();
++    }
++
++    int *fds = new int[fdCount];
++    bool ok = true;
++    for (int i = 0; i < fdCount; i++) {
++        int fdValue = -1;
++        if (!kernel->machine->ReadMem(fdsAddr + i * 4, 4, &fdValue)) {
++            ok = false;
++            break;
++        }
++        fds[i] = fdValue;
++    }
++
++    if (!ok) {
++        kernel->machine->WriteRegister(2, -1);
++    } else {
++        kernel->machine->WriteRegister(2, SysExecPV(name, fds, fdCount));
++    }
++
++    delete[] fds;
++    delete[] name;
++    return move_program_counter();
++}
++
+ /**
+  * @brief handle System Call Join
+  * @param id: thread id (get from R4)
+@@ -414,16 +465,18 @@ void handle_SC_GetPid() {
+ }
+ 
+ void handle_SC_Pipe() {
+-    int virtAddr = kernel->machine->ReadRegister(4);
+-    int fds[2];
+-    int status = SysPipe(fds);
++    int readAddr = kernel->machine->ReadRegister(4);
++    int writeAddr = kernel->machine->ReadRegister(5);
++    int readFd = -1;
++    int writeFd = -1;
++    int status = SysPipe(&readFd, &writeFd);
+ 
+     if (status == 0) {
+         for (int tries = 0; tries < 3; tries++) {
+-            if (kernel->machine->WriteMem(virtAddr, 4, fds[0])) break;
++            if (kernel->machine->WriteMem(readAddr, 4, readFd)) break;
+         }
+         for (int tries = 0; tries < 3; tries++) {
+-            if (kernel->machine->WriteMem(virtAddr + 4, 4, fds[1])) break;
++            if (kernel->machine->WriteMem(writeAddr, 4, writeFd)) break;
+         }
+     }
+ 
+@@ -431,6 +484,68 @@ void handle_SC_Pipe() {
+     return move_program_counter();
+ }
+ 
++void handle_SC_PipeRead() {
++    int desNum = kernel->machine->ReadRegister(4);
++    int bufferAddr = kernel->machine->ReadRegister(5);
++    int charCount = kernel->machine->ReadRegister(6);
++
++    if (charCount < 0) {
++        kernel->machine->WriteRegister(2, -1);
++        return move_program_counter();
++    }
++
++    char *buffer = new char[charCount + 1];
++    int readRes = SysPipeRead(desNum, buffer, charCount);
++    if (readRes >= 0) {
++        buffer[readRes] = '\0';
++        StringSys2User(buffer, bufferAddr, readRes);
++    }
++    kernel->machine->WriteRegister(2, readRes);
++    delete[] buffer;
++    return move_program_counter();
++}
++
++void handle_SC_PipeWrite() {
++    int desNum = kernel->machine->ReadRegister(4);
++    int bufferAddr = kernel->machine->ReadRegister(5);
++    int charCount = kernel->machine->ReadRegister(6);
++
++    char *buffer = stringUser2System(bufferAddr, charCount);
++    if (buffer == NULL) {
++        kernel->machine->WriteRegister(2, -1);
++        return move_program_counter();
++    }
++
++    kernel->machine->WriteRegister(2, SysPipeWrite(desNum, buffer, charCount));
++    delete[] buffer;
++    return move_program_counter();
++}
++
++void handle_SC_ReadInt() {
++    int virtAddr = kernel->machine->ReadRegister(4);
++    char *buffer = stringUser2System(virtAddr, sizeof(int));
++    int value = 0;
++
++    if (buffer != NULL) {
++        memcpy(&value, buffer, sizeof(int));
++        delete[] buffer;
++    }
++
++    kernel->machine->WriteRegister(2, value);
++    return move_program_counter();
++}
++
++void handle_SC_GetPD() {
++    int index = kernel->machine->ReadRegister(4);
++    kernel->machine->WriteRegister(2, SysGetPD(index));
++    return move_program_counter();
++}
++
++void handle_SC_GetPDCount() {
++    kernel->machine->WriteRegister(2, SysGetPDCount());
++    return move_program_counter();
++}
++
+ void ExceptionHandler(ExceptionType which) {
+     int type = kernel->machine->ReadRegister(2);
+ 
+@@ -445,6 +560,7 @@ void ExceptionHandler(ExceptionType which) {
+             if (kernel->currentThread->space != NULL &&
+                 kernel->currentThread->space->HandlePageFault(
+                     kernel->machine->ReadRegister(BadVAddrReg))) {
++                kernel->currentThread->space->RestoreState();
+                 return;
+             }
+             cerr << "Unhandled page fault at "
+@@ -509,6 +625,20 @@ void ExceptionHandler(ExceptionType which) {
+                     return handle_SC_GetPid();
+                 case SC_Pipe:
+                     return handle_SC_Pipe();
++                case SC_PipeRead:
++                    return handle_SC_PipeRead();
++                case SC_PipeWrite:
++                    return handle_SC_PipeWrite();
++                case SC_ExecP:
++                    return handle_SC_ExecP();
++                case SC_ExecPV:
++                    return handle_SC_ExecPV();
++                case SC_ReadInt:
++                    return handle_SC_ReadInt();
++                case SC_GetPD:
++                    return handle_SC_GetPD();
++                case SC_GetPDCount:
++                    return handle_SC_GetPDCount();
+                 /**
+                  * Handle all not implemented syscalls
+                  * If you want to write a new handler for syscall:
+diff --git a/code/userprog/ksyscall.h b/code/userprog/ksyscall.h
+index c629574..17a500a 100644
+--- a/code/userprog/ksyscall.h
++++ b/code/userprog/ksyscall.h
+@@ -166,7 +166,14 @@ int SysOpen(char* fileName, int type) {
+     return id;
+ }
+ 
+-int SysClose(int id) { return kernel->fileSystem->Close(id); }
++int SysClose(int id) {
++    if (kernel->pipeDes->IsPipeDescriptor(id)) {
++        int result = kernel->pipeDes->closeDes(id);
++        if (result == 0) kernel->currentThread->RemovePipeDescriptor(id);
++        return result;
++    }
++    return kernel->fileSystem->Close(id);
++}
+ 
+ int SysRead(char* buffer, int charCount, int fileId) {
+     if (fileId == 0) {
+@@ -190,7 +197,7 @@ int SysSeek(int seekPos, int fileId) {
+     return kernel->fileSystem->Seek(seekPos, fileId);
+ }
+ 
+-int SysExec(char* name) {
++int SysExec(char* name) {
+     // cerr << "call: `" << name  << "`"<< endl;
+     OpenFile* oFile = kernel->fileSystem->Open(name);
+     if (oFile == NULL) {
+@@ -201,12 +208,38 @@ int SysExec(char* name) {
+     delete oFile;
+ 
+     // Return child process id
+-    return kernel->pTab->ExecUpdate(name);
+-}
+-
+-int SysJoin(int id) { return kernel->pTab->JoinUpdate(id); }
++    return kernel->pTab->ExecUpdate(name);
++}
++
++int SysExecP(char *name, int pDes) {
++    OpenFile *oFile = kernel->fileSystem->Open(name);
++    if (oFile == NULL) {
++        DEBUG(dbgSys, "\nExec:: Can't open this file.");
++        return -1;
++    }
++
++    delete oFile;
++    return kernel->pTab->ExecUpdate(name, pDes);
++}
++
++int SysExecPV(char *name, int *pDes, int pDesCount) {
++    OpenFile *oFile = kernel->fileSystem->Open(name);
++    if (oFile == NULL) {
++        DEBUG(dbgSys, "\nExec:: Can't open this file.");
++        return -1;
++    }
++
++    delete oFile;
++    return kernel->pTab->ExecUpdate(name, pDes, pDesCount);
++}
++
++int SysJoin(int id) { return kernel->pTab->JoinUpdate(id); }
+ 
+-int SysExit(int id) { return kernel->pTab->ExitUpdate(id); }
++int SysExit(int id) {
++    kernel->pipeDes->CloseAllForProcess(kernel->currentThread->processID);
++    kernel->currentThread->ClearPipeDescriptors();
++    return kernel->pTab->ExitUpdate(id);
++}
+ 
+ int SysCreateSemaphore(char* name, int initialValue) {
+     int res = kernel->semTab->Create(name, initialValue);
+@@ -246,9 +279,27 @@ int SysSignal(char* name) {
+ 
+ int SysGetPid() { return kernel->currentThread->processID; }
+ 
+-int SysPipe(int fds[2]) {
+-    return kernel->fileSystem->fileTable[kernel->fileSystem->FileTableIndex()]
+-        ->CreatePipe(fds);
++int SysPipe(int *readFd, int *writeFd) {
++    int result = kernel->pipeDes->createDes(readFd, writeFd, "pipe");
++    if (result == 0) {
++        kernel->currentThread->AddPipeDescriptor(*readFd);
++        kernel->currentThread->AddPipeDescriptor(*writeFd);
++    }
++    return result;
++}
++
++int SysPipe(int fds[2]) { return SysPipe(&fds[0], &fds[1]); }
++
++int SysPipeRead(int desNum, char *buffer, int charCount) {
++    return kernel->pipeDes->readDes(desNum, buffer, charCount);
+ }
+ 
++int SysPipeWrite(int desNum, char *buffer, int charCount) {
++    return kernel->pipeDes->writeDes(desNum, buffer, charCount);
++}
++
++int SysGetPD(int index) { return kernel->currentThread->GetPipeDescriptor(index); }
++
++int SysGetPDCount() { return kernel->currentThread->GetPipeDescriptorCount(); }
++
+ #endif /* ! __USERPROG_KSYSCALL_H__ */
+diff --git a/code/userprog/syscall.h b/code/userprog/syscall.h
+index d4a5b25..2bed96f 100644
+--- a/code/userprog/syscall.h
++++ b/code/userprog/syscall.h
+@@ -49,6 +49,13 @@
+ #define SC_Signal 53
+ #define SC_GetPid 54
+ #define SC_Pipe 55
++#define SC_PipeRead 56
++#define SC_PipeWrite 57
++#define SC_ExecP 58
++#define SC_ReadInt 59
++#define SC_GetPD 60
++#define SC_ExecPV 61
++#define SC_GetPDCount 62
+ 
+ #ifndef IN_ASM
+ 
+@@ -174,7 +181,14 @@ int Seek(int position, OpenFileId id);
+  */
+ int Close(OpenFileId id);
+ 
+-int Pipe(OpenFileId fds[2]);
++int Pipe(OpenFileId *readFd, OpenFileId *writeFd);
++int PipeRead(int desNum, char *buffer, int charCount);
++int PipeWrite(int desNum, char *buffer, int charCount);
++SpaceId ExecP(char *exec_name, int pDes);
++SpaceId ExecPV(char *exec_name, int *pDes, int pDesCount);
++int ReadInt(char *buffer);
++int GetPD(int index);
++int GetPDCount();
+ 
+ // Ham cho semaphore
+ // Success: 0 - Failed: -1
