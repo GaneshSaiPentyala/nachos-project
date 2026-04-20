@@ -5,7 +5,7 @@ index aae4cc0..552dcf0 100644
 @@ -21,6 +21,19 @@
  #include "machine.h"
  #include "synch.h"
- 
+  
 +struct FrameRecord {
 +    AddrSpace *owner;
 +    unsigned int vpn;
