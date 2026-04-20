@@ -7,7 +7,7 @@
  * by Marcus Voelp  (c) Universitaet Karlsruhe
  *
  **************************************************************/
-#define SC_Abs 55
+
 #ifndef __USERPROG_KSYSCALL_H__
 #define __USERPROG_KSYSCALL_H__
 
@@ -15,7 +15,6 @@
 #include "synchconsole.h"
 #include "ksyscallhelper.h"
 #include <stdlib.h>
-int Abs(int op);
 
 void SysHalt() { kernel->interrupt->Halt(); }
 
@@ -29,7 +28,7 @@ int SysReadNum() {
     if (len == 0) return 0;
 
     // Check comment below to understand this line of code
-    if (strcmp(_numberBuffer, "-2147483648") == 0) return INT32_MIN;
+    if (strcmp(_numberBuffer, "-2147483648") == 0) return -100000;
 
     bool nega = (_numberBuffer[0] == '-');
     int zeros = 0;
@@ -90,7 +89,7 @@ int SysReadNum() {
 void SysPrintNum(int num) {
     if (num == 0) return kernel->synchConsoleOut->PutChar('0');
 
-    if (num == INT32_MIN) {
+    if (num == -100000) {
         kernel->synchConsoleOut->PutChar('-');
         for (int i = 0; i < 10; ++i)
             kernel->synchConsoleOut->PutChar("2147483648"[i]);
@@ -114,12 +113,6 @@ char SysReadChar() { return kernel->synchConsoleIn->GetChar(); }
 
 void SysPrintChar(char character) {
     kernel->synchConsoleOut->PutChar(character);
-}
-void SysSleep(int duration) {
-    if (duration <= 0) return;
-
-    int wakeTick = kernel->stats->totalTicks + duration;
-    kernel->scheduler->addToSleep(kernel->currentThread, wakeTick);
 }
 
 int SysRandomNum() { return random(); }
@@ -173,7 +166,14 @@ int SysOpen(char* fileName, int type) {
     return id;
 }
 
-int SysClose(int id) { return kernel->fileSystem->Close(id); }
+int SysClose(int id) {
+    if (kernel->pipeDes->IsPipeDescriptor(id)) {
+        int result = kernel->pipeDes->closeDes(id);
+        if (result == 0) kernel->currentThread->RemovePipeDescriptor(id);
+        return result;
+    }
+    return kernel->fileSystem->Close(id);
+}
 
 int SysRead(char* buffer, int charCount, int fileId) {
     if (fileId == 0) {
@@ -211,9 +211,35 @@ int SysExec(char* name) {
     return kernel->pTab->ExecUpdate(name);
 }
 
+int SysExecP(char *name, int pDes) {
+    OpenFile *oFile = kernel->fileSystem->Open(name);
+    if (oFile == NULL) {
+        DEBUG(dbgSys, "\nExec:: Can't open this file.");
+        return -1;
+    }
+
+    delete oFile;
+    return kernel->pTab->ExecUpdate(name, pDes);
+}
+
+int SysExecPV(char *name, int *pDes, int pDesCount) {
+    OpenFile *oFile = kernel->fileSystem->Open(name);
+    if (oFile == NULL) {
+        DEBUG(dbgSys, "\nExec:: Can't open this file.");
+        return -1;
+    }
+
+    delete oFile;
+    return kernel->pTab->ExecUpdate(name, pDes, pDesCount);
+}
+
 int SysJoin(int id) { return kernel->pTab->JoinUpdate(id); }
 
-int SysExit(int id) { return kernel->pTab->ExitUpdate(id); }
+int SysExit(int id) {
+    kernel->pipeDes->CloseAllForProcess(kernel->currentThread->processID);
+    kernel->currentThread->ClearPipeDescriptors();
+    return kernel->pTab->ExitUpdate(id);
+}
 
 int SysCreateSemaphore(char* name, int initialValue) {
     int res = kernel->semTab->Create(name, initialValue);
@@ -252,5 +278,28 @@ int SysSignal(char* name) {
 }
 
 int SysGetPid() { return kernel->currentThread->processID; }
+
+int SysPipe(int *readFd, int *writeFd) {
+    int result = kernel->pipeDes->createDes(readFd, writeFd, "pipe");
+    if (result == 0) {
+        kernel->currentThread->AddPipeDescriptor(*readFd);
+        kernel->currentThread->AddPipeDescriptor(*writeFd);
+    }
+    return result;
+}
+
+int SysPipe(int fds[2]) { return SysPipe(&fds[0], &fds[1]); }
+
+int SysPipeRead(int desNum, char *buffer, int charCount) {
+    return kernel->pipeDes->readDes(desNum, buffer, charCount);
+}
+
+int SysPipeWrite(int desNum, char *buffer, int charCount) {
+    return kernel->pipeDes->writeDes(desNum, buffer, charCount);
+}
+
+int SysGetPD(int index) { return kernel->currentThread->GetPipeDescriptor(index); }
+
+int SysGetPDCount() { return kernel->currentThread->GetPipeDescriptorCount(); }
 
 #endif /* ! __USERPROG_KSYSCALL_H__ */

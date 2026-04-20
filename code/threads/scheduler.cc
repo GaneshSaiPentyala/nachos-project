@@ -30,21 +30,9 @@
 //----------------------------------------------------------------------
 
 Scheduler::Scheduler() {
-    readyList = new SortedList<Thread *>(ThreadCompare);
-    sleepList = new List<SleepEntry*>;
+    readyList = new List<Thread *>;
     toBeDestroyed = NULL;
 }
-static int ThreadCompare(Thread *a, Thread *b) {
-    if (a->priority > b->priority) return -1;
-    else if (a->priority < b->priority) return 1;
-    else return 0;
-}
-class SleepCallback : public CallBackObj {
-  public:
-    void CallBack() {
-        kernel->scheduler->processSleepList();
-    }
-};
 
 //----------------------------------------------------------------------
 // Scheduler::~Scheduler
@@ -175,46 +163,4 @@ void Scheduler::CheckToBeDestroyed() {
 void Scheduler::Print() {
     cout << "Ready list contents:\n";
     readyList->Apply(ThreadPrint);
-}
-void Scheduler::addToSleep(Thread* t, int wakeTick) {
-    IntStatus old = kernel->interrupt->SetLevel(IntOff);
-
-    SleepEntry* entry = new SleepEntry(t, wakeTick);
-    sleepList->Append(entry);
-
-    int delay = wakeTick - kernel->stats->totalTicks;
-    if (delay < 0) delay = 0;
-
-    SleepCallback* cb = new SleepCallback();
-    kernel->interrupt->Schedule(cb, delay, TimerInt);
-
-    t->Sleep(false);
-
-    kernel->interrupt->SetLevel(old);
-}
-bool Scheduler::processSleepList() {
-    bool wokeAny = false;
-
-    while (true) {
-        bool found = false;
-        ListIterator<SleepEntry*> it(sleepList);
-
-        for (; !it.IsDone(); it.Next()) {
-            SleepEntry* entry = it.Item();
-
-            if (entry->wakeTick <= kernel->stats->totalTicks) {
-                sleepList->Remove(entry);
-                ReadyToRun(entry->thread);
-                delete entry;
-
-                found = true;
-                wokeAny = true;
-                break;
-            }
-        }
-
-        if (!found) break;
-    }
-
-    return wokeAny;
 }

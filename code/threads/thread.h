@@ -44,8 +44,6 @@
 #include "machine.h"
 #include "addrspace.h"
 
-
-
 // CPU register state to be saved on context switch.
 // The x86 needs to save only a few registers,
 // SPARC and MIPS needs to save 10 registers,
@@ -82,7 +80,10 @@ class Thread {
     bool has_dynamic_name;  // true if the thread name is dynamically allocated
 
    public:
+    static const int kMaxInheritedPipeDescriptors = 16;
     Thread(char *debugName,
+           bool _has_dynamic_name = false);  // initialize a Thread
+    Thread(char *debugName, int pDes,
            bool _has_dynamic_name = false);  // initialize a Thread
     ~Thread();                               // deallocate a Thread
                                              // NOTE -- thread being deleted
@@ -92,10 +93,14 @@ class Thread {
     int processID;
     int parrentID;
     int exitStatus;
-    int priority;
     void FreeSpace() {
         if (space != 0) delete space;
     }
+    bool AddPipeDescriptor(int desNum);
+    void RemovePipeDescriptor(int desNum);
+    int GetPipeDescriptor(int index) const;
+    int GetPipeDescriptorCount() const;
+    void ClearPipeDescriptors();
 
     // basic thread operations
 
@@ -110,7 +115,6 @@ class Thread {
 
     void CheckOverflow();  // Check if thread stack has overflowed
     void setStatus(ThreadStatus st) { status = st; }
-    void setPriority(int p) { priority = p; }
     char *getName() { return (name); }
     void Print() { cout << name; }
     void SelfTest();  // test whether thread impl is working
@@ -133,6 +137,8 @@ class Thread {
     // executing kernel code.
 
     int userRegisters[NumTotalRegs];  // user-level CPU register state
+    int pipeDescriptors[kMaxInheritedPipeDescriptors];
+    int pipeDescriptorCount;
 
    public:
     void SaveUserState();     // save user-level register state

@@ -146,15 +146,6 @@ Seek:
 	j	$31
 	.end Seek
 
-	.global Sleep
-	.ent Sleep
-Sleep:
-    addiu $2,$0,SC_Sleep
-    syscall
-    j $31
-.end Sleep
-
-
         .globl ThreadFork
         .ent    ThreadFork
 ThreadFork:
@@ -282,6 +273,70 @@ GetPid:
 	syscall
 	j	$31
 	.end GetPid
+
+	.globl Pipe
+	.ent	Pipe
+Pipe:
+	addiu $2,$0,SC_Pipe
+	syscall
+	j	$31
+	.end Pipe
+
+	.globl PipeRead
+	.ent	PipeRead
+PipeRead:
+	addiu $2,$0,SC_PipeRead
+	syscall
+	j	$31
+	.end PipeRead
+
+	.globl PipeWrite
+	.ent	PipeWrite
+PipeWrite:
+	addiu $2,$0,SC_PipeWrite
+	syscall
+	j	$31
+	.end PipeWrite
+
+	.globl ExecP
+	.ent	ExecP
+ExecP:
+	addiu $2,$0,SC_ExecP
+	syscall
+	j	$31
+	.end ExecP
+
+	.globl ExecPV
+	.ent	ExecPV
+ExecPV:
+	addiu $2,$0,SC_ExecPV
+	syscall
+	j	$31
+	.end ExecPV
+
+	.globl ReadInt
+	.ent	ReadInt
+ReadInt:
+	addiu $2,$0,SC_ReadInt
+	syscall
+	j	$31
+	.end ReadInt
+
+	.globl GetPD
+	.ent	GetPD
+GetPD:
+	addiu $2,$0,SC_GetPD
+	syscall
+	j	$31
+	.end GetPD
+
+	.globl GetPDCount
+	.ent	GetPDCount
+GetPDCount:
+	addiu $2,$0,SC_GetPDCount
+	syscall
+	j	$31
+	.end GetPDCount
 
 /* dummy function to keep gcc happy */
         .globl  __main

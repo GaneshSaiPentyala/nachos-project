@@ -112,7 +112,7 @@ ifeq ($(hosttype),unknown)
 PROGRAMS = unknownhost
 else
 # change this if you create a new test program!
-PROGRAMS = child add abs halt shell matmult sort segments sleep_test test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
+PROGRAMS = pipe_parent pipe_child add halt shell matmult sort segments test_syscall num_io char_io random str_io ascii bubblesort help create_file open_file readwrite exec test_sem sinhvien voinuoc main
 endif
 
 all: $(PROGRAMS)
@@ -132,17 +132,6 @@ add.o: add.c
 add: add.o start.o
 	$(LD) $(LDFLAGS) start.o add.o -o add.coff
 	$(COFF2NOFF) add.coff add
-child.o: child.c
-	$(CC) $(CFLAGS) -c child.c
-
-child: child.o start.o
-	$(LD) $(LDFLAGS) start.o child.o -o child.coff
-	$(COFF2NOFF) child.coff child
-abs.o: abs.c
-	$(CC) $(CFLAGS) -c abs.c
-abs: abs.o start.o
-	$(LD) $(LDFLAGS) start.o abs.o -o abs.coff
-	$(COFF2NOFF) abs.coff abs
 
 shell.o: shell.c
 	$(CC) $(CFLAGS) -c shell.c
@@ -264,6 +253,20 @@ main: main.o start.o
 	$(LD) $(LDFLAGS) start.o main.o -o main.coff
 	$(COFF2NOFF) main.coff main
 
+pipe_parent.o: pipe_parent.c
+	$(CC) $(CFLAGS) -c pipe_parent.c
+
+pipe_parent: pipe_parent.o start.o
+	$(LD) $(LDFLAGS) start.o pipe_parent.o -o pipe_parent.coff
+	$(COFF2NOFF) pipe_parent.coff pipe_parent
+
+pipe_child.o: pipe_child.c
+	$(CC) $(CFLAGS) -c pipe_child.c
+
+pipe_child: pipe_child.o start.o
+	$(LD) $(LDFLAGS) start.o pipe_child.o -o pipe_child.coff
+	$(COFF2NOFF) pipe_child.coff pipe_child
+
 clean:
 	$(RM) -f *.o *.ii
 	$(RM) -f *.coff
@@ -276,9 +279,3 @@ unknownhost:
 	@echo make is terminating.
 	@echo If you are on an MFCF machine, contact the instructor to report this problem
 	@echo Otherwise, edit Makefile.dep and try again.
-sleep_test.o: sleep_test.c
-	$(CC) $(CFLAGS) -c sleep_test.c
-
-sleep_test: sleep_test.o start.o
-	$(LD) $(LDFLAGS) start.o sleep_test.o -o sleep_test.coff
-	$(COFF2NOFF) sleep_test.coff sleep_test

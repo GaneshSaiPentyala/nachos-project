@@ -96,6 +96,7 @@ void Kernel::Initialize(char *userProgName /*=NULL*/) {
     scheduler = new Scheduler();     // initialize the ready queue
     alarm = new Alarm(randomSlice);  // start up time slicing
     machine = new Machine(debugUserProg);
+    pipeDes = new PipeDescriptors();
     synchConsoleIn = new SynchConsoleInput(consoleIn);     // input from stdin
     synchConsoleOut = new SynchConsoleOutput(consoleOut);  // output to stdout
     synchDisk = new SynchDisk();                           //
@@ -130,6 +131,7 @@ Kernel::~Kernel() {
     delete synchConsoleOut;
     delete synchDisk;
     delete fileSystem;
+    delete pipeDes;
     delete postOfficeIn;
     delete postOfficeOut;
     delete pTab;

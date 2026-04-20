@@ -18,6 +18,7 @@
 #include "alarm.h"
 #include "filesys.h"
 #include "machine.h"
+#include "pipe.h"
 
 class PostOfficeInput;
 class PostOfficeOutput;
@@ -61,6 +62,7 @@ class Kernel {
     FileSystem *fileSystem;
     PostOfficeInput *postOfficeIn;
     PostOfficeOutput *postOfficeOut;
+    PipeDescriptors *pipeDes;
 
     Semaphore *addrLock;
     Bitmap *gPhysPageBitMap;

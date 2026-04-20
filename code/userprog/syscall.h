@@ -12,7 +12,6 @@
 
 #ifndef SYSCALLS_H
 #define SYSCALLS_H
-#define SC_Sleep 60
 
 #include "copyright.h"
 #include "errno.h"
@@ -49,6 +48,14 @@
 #define SC_Wait 52
 #define SC_Signal 53
 #define SC_GetPid 54
+#define SC_Pipe 55
+#define SC_PipeRead 56
+#define SC_PipeWrite 57
+#define SC_ExecP 58
+#define SC_ReadInt 59
+#define SC_GetPD 60
+#define SC_ExecPV 61
+#define SC_GetPDCount 62
 
 #ifndef IN_ASM
 
@@ -173,6 +180,15 @@ int Seek(int position, OpenFileId id);
  * Return 1 on success, negative error code on failure
  */
 int Close(OpenFileId id);
+
+int Pipe(OpenFileId *readFd, OpenFileId *writeFd);
+int PipeRead(int desNum, char *buffer, int charCount);
+int PipeWrite(int desNum, char *buffer, int charCount);
+SpaceId ExecP(char *exec_name, int pDes);
+SpaceId ExecPV(char *exec_name, int *pDes, int pDesCount);
+int ReadInt(char *buffer);
+int GetPD(int index);
+int GetPDCount();
 
 // Ham cho semaphore
 // Success: 0 - Failed: -1

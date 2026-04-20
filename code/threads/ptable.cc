@@ -68,6 +68,67 @@ int PTable::ExecUpdate(char* name) {
     return pid;
 }
 
+int PTable::ExecUpdate(char *name, int pDes) {
+    return ExecUpdate(name, &pDes, 1);
+}
+
+int PTable::ExecUpdate(char *name, int *pDes, int pDesCount) {
+    bmsem->P();
+
+    if (name == NULL) {
+        DEBUG(dbgSys, "\nPTable::Exec : Can't not execute name is NULL.\n");
+        bmsem->V();
+        return -1;
+    }
+    if (strcmp(name, kernel->currentThread->getName()) == 0) {
+        DEBUG(dbgSys, "\nPTable::Exec : Can't not execute itself.\n");
+        bmsem->V();
+        return -1;
+    }
+
+    int index = this->GetFreeSlot();
+    if (index < 0) {
+        DEBUG(dbgSys, "\nPTable::Exec :There is no free slot.\n");
+        bmsem->V();
+        return -1;
+    }
+
+    pcb[index] = new PCB(index);
+    pcb[index]->SetFileName(name);
+    kernel->fileSystem->Renew(index);
+    pcb[index]->parentID = kernel->currentThread->processID;
+
+    int childPipeDescriptors[Thread::kMaxInheritedPipeDescriptors];
+    int childPipeCount = 0;
+
+    for (int i = 0; i < pDesCount; i++) {
+        int childDescriptor = -1;
+        if (kernel->pipeDes->duplicateDesToProcess(pDes[i], index,
+                                                   &childDescriptor) != 0) {
+            for (int j = 0; j < childPipeCount; j++) {
+                kernel->pipeDes->closeDes(childPipeDescriptors[j]);
+            }
+            delete pcb[index];
+            pcb[index] = NULL;
+            bmsem->V();
+            return -1;
+        }
+        childPipeDescriptors[childPipeCount++] = childDescriptor;
+    }
+
+    int pid = pcb[index]->Exec(name, index, childPipeDescriptors, childPipeCount);
+    if (pid < 0) {
+        for (int i = 0; i < childPipeCount; i++) {
+            kernel->pipeDes->closeDes(childPipeDescriptors[i]);
+        }
+        delete pcb[index];
+        pcb[index] = NULL;
+    }
+
+    bmsem->V();
+    return pid;
+}
+
 int PTable::ExitUpdate(int exitcode) {
     // Nếu tiến trình gọi là main process thì gọi Halt().
     int id = kernel->currentThread->processID;

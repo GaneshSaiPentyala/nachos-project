@@ -15,6 +15,7 @@
 
 #include "copyright.h"
 #include "filesys.h"
+#include "noff.h"
 
 #define UserStackSize 1024  // increase this as necessary!
 
@@ -36,15 +37,40 @@ class AddrSpace {
     // to physical address _paddr_. _mode_
     // is 0 for Read, 1 for Write.
     ExceptionType Translate(unsigned int vaddr, unsigned int *paddr, int mode);
+    bool HandlePageFault(int badVAddr);
     // void InitRegisters();
+    friend int AllocateFrame(AddrSpace *space, unsigned int vpn);
+    friend int SelectVictimFrame();
    private:
+    struct PageInfo {
+        bool hasSwapCopy;
+        bool isReadOnly;
+    };
+
     TranslationEntry *pageTable;  // Assume linear page table translation
                                   // for now!
     unsigned int numPages;        // Number of pages in the virtual
                                   // address space
+    OpenFile *executable;
+    NoffHeader noffHeader;
+    OpenFile *swapFile;
+    char *swapFileName;
+    PageInfo *pageInfo;
 
     void InitRegisters();  // Initialize user-level CPU registers,
                            // before jumping to user code
+    bool LoadPage(unsigned int vpn);
+    void LoadSegmentPage(const Segment &segment, unsigned int vpn,
+                         int physicalPage);
+    void LoadFromSwap(unsigned int vpn, int physicalPage);
+    void EvictPage(unsigned int vpn);
+    bool IsPageReadOnly(unsigned int vpn);
+    bool PageOverlapsSegment(const Segment &segment, unsigned int vpn);
+    int SwapOffset(unsigned int vpn);
+    void FlushTlb();
+    void SyncTlbForVpn(unsigned int vpn);
+    void InvalidateTlbForPhysicalPage(int physicalPage);
+    void InstallTlbEntry(unsigned int vpn);
 };
 
 #endif  // ADDRSPACE_H

@@ -35,17 +35,47 @@ const int STACK_FENCEPOST = 0xdedbeef;
 
 Thread::Thread(char *threadName, bool _has_dynamic_name /*=false*/) {
     has_dynamic_name = _has_dynamic_name;
-    name = threadName;
+    if (has_dynamic_name && threadName != NULL) {
+        name = new char[strlen(threadName) + 1];
+        strcpy(name, threadName);
+    } else {
+        name = threadName;
+    }
     stackTop = NULL;
     stack = NULL;
     status = JUST_CREATED;
-    priority = random() % 10000;
     for (int i = 0; i < MachineStateSize; i++) {
         machineState[i] = NULL;  // not strictly necessary, since
                                  // new thread ignores contents
                                  // of machine registers
     }
     space = NULL;
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
+}
+
+Thread::Thread(char *threadName, int pDes, bool _has_dynamic_name /*=false*/) {
+    has_dynamic_name = _has_dynamic_name;
+    if (has_dynamic_name && threadName != NULL) {
+        name = new char[strlen(threadName) + 1];
+        strcpy(name, threadName);
+    } else {
+        name = threadName;
+    }
+    stackTop = NULL;
+    stack = NULL;
+    status = JUST_CREATED;
+    for (int i = 0; i < MachineStateSize; i++) {
+        machineState[i] = NULL;
+    }
+    space = NULL;
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
+    AddPipeDescriptor(pDes);
 }
 
 //----------------------------------------------------------------------
@@ -103,6 +133,39 @@ void Thread::Fork(VoidFunctionPtr func, void *arg) {
     scheduler->ReadyToRun(this);  // ReadyToRun assumes that interrupts
                                   // are disabled!
     (void)interrupt->SetLevel(oldLevel);
+}
+
+bool Thread::AddPipeDescriptor(int desNum) {
+    if (pipeDescriptorCount >= kMaxInheritedPipeDescriptors) return false;
+    pipeDescriptors[pipeDescriptorCount++] = desNum;
+    return true;
+}
+
+void Thread::RemovePipeDescriptor(int desNum) {
+    for (int i = 0; i < pipeDescriptorCount; i++) {
+        if (pipeDescriptors[i] == desNum) {
+            for (int j = i; j + 1 < pipeDescriptorCount; j++) {
+                pipeDescriptors[j] = pipeDescriptors[j + 1];
+            }
+            pipeDescriptors[pipeDescriptorCount - 1] = -1;
+            pipeDescriptorCount--;
+            return;
+        }
+    }
+}
+
+int Thread::GetPipeDescriptor(int index) const {
+    if (index < 0 || index >= pipeDescriptorCount) return -1;
+    return pipeDescriptors[index];
+}
+
+int Thread::GetPipeDescriptorCount() const { return pipeDescriptorCount; }
+
+void Thread::ClearPipeDescriptors() {
+    pipeDescriptorCount = 0;
+    for (int i = 0; i < kMaxInheritedPipeDescriptors; i++) {
+        pipeDescriptors[i] = -1;
+    }
 }
 
 //----------------------------------------------------------------------
@@ -201,9 +264,9 @@ void Thread::Yield() {
 
     DEBUG(dbgThread, "Yielding thread: " << name);
 
-    kernel->scheduler->ReadyToRun(this);
     nextThread = kernel->scheduler->FindNextToRun();
     if (nextThread != NULL) {
+        kernel->scheduler->ReadyToRun(this);
         kernel->scheduler->Run(nextThread, FALSE);
     }
     (void)kernel->interrupt->SetLevel(oldLevel);
@@ -363,7 +426,6 @@ void Thread::SaveUserState() {
         userRegisters[i] = kernel->machine->ReadRegister(i);
 }
 
-
 //----------------------------------------------------------------------
 // Thread::RestoreUserState
 //	Restore the CPU state of a user program on a context switch.
@@ -391,10 +453,7 @@ static void SimpleThread(int which) {
     int num;
 
     for (num = 0; num < 5; num++) {
-        cout << "*** thread " << which
-             << " (Priority: " << kernel->currentThread->priority << ")"
-             << " looped " << num << " times\n";
-        
+        cout << "*** thread " << which << " looped " << num << " times\n";
         kernel->currentThread->Yield();
     }
 }
@@ -407,24 +466,10 @@ static void SimpleThread(int which) {
 
 void Thread::SelfTest() {
     DEBUG(dbgThread, "Entering Thread::SelfTest");
-    cout << "--- Starting Priority Scheduler Test ---\n";
 
-    Thread *t1 = new Thread("Thread 1");
-    t1->priority = 10;
+    Thread *t = new Thread("forked thread");
 
-    Thread *t2 = new Thread("Thread 2");
-    t2->priority = 50;
-
-    Thread *t3 = new Thread("Thread 3");
-    t3->priority = 30;
-
-    t1->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
-    t2->Fork((VoidFunctionPtr)SimpleThread, (void *)2);
-    t3->Fork((VoidFunctionPtr)SimpleThread, (void *)3);
-
-    cout << "Main thread yielding...\n";
+    t->Fork((VoidFunctionPtr)SimpleThread, (void *)1);
     kernel->currentThread->Yield();
-
-    cout << "--- Priority Scheduler Test Complete ---\n";
-    
+    SimpleThread(0);
 }
